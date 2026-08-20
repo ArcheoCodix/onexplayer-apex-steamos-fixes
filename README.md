@@ -50,7 +50,8 @@ Applies a parametric EQ to the internal speakers using PipeWire's built-in filte
 ### Resume Recovery
 Installs a background service that recovers the gamepad after sleep by rebinding the xHCI USB controller. Without this, the Xbox controller disappears after wake and requires a reboot.
 
-- Listens for D-Bus resume events and rebinds PCI device `0000:65:00.4`
+- Listens for D-Bus resume events and rebinds the internal xHCI controller,
+  discovered at resume time (its PCI address depends on the Apex firmware version)
 - Two-phase recovery: fast (1s) then fallback (2s)
 
 ### Light Sleep
