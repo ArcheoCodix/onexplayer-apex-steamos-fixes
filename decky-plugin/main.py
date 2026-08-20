@@ -9,6 +9,7 @@ the React frontend can call via @decky/api's `callable()`.
 
 import asyncio
 import os
+import subprocess
 import sys
 
 # Official Decky module — injected by the loader at runtime.
@@ -198,6 +199,44 @@ if _xhci_recovery_mod:
     _xhci_recovery_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
 
 
+_INPUTPLUMBER_UNIT = "inputplumber.service"
+
+
+def _clean_env():
+    """Strip Decky's LD_LIBRARY_PATH/LD_PRELOAD for subprocess calls."""
+    env = os.environ.copy()
+    for var in ("LD_LIBRARY_PATH", "LD_PRELOAD"):
+        env.pop(var, None)
+    return env
+
+
+def _restart_inputplumber():
+    """Restart InputPlumber so it re-attaches to the recovered source devices.
+
+    InputPlumber does pick devices back up on its own, but only for the sources
+    it is still watching; after the whole controller is rebound a restart is the
+    reliable way to get a clean composite device.
+    """
+    try:
+        r = subprocess.run(
+            ["systemctl", "is-active", _INPUTPLUMBER_UNIT],
+            capture_output=True, text=True, timeout=10, env=_clean_env()
+        )
+        if r.stdout.strip() != "active":
+            _log_info(f"{_INPUTPLUMBER_UNIT} is not active — nothing to restart")
+            return
+        r = subprocess.run(
+            ["systemctl", "restart", _INPUTPLUMBER_UNIT],
+            capture_output=True, text=True, timeout=30, env=_clean_env()
+        )
+        if r.returncode == 0:
+            _log_info(f"Restarted {_INPUTPLUMBER_UNIT}")
+        else:
+            _log_error(f"Failed to restart {_INPUTPLUMBER_UNIT}: {r.stderr.strip()}")
+    except Exception as e:
+        _log_error(f"InputPlumber restart failed: {e}")
+
+
 class Plugin:
     async def _main(self):
         """Plugin entry point — called by Decky on load."""
@@ -205,7 +244,7 @@ class Plugin:
             from build_info import BUILD_ID
         except ImportError:
             BUILD_ID = "unknown"
-        _log_info(f"OneXPlayer Apex Tools starting ({BUILD_ID})")
+        _log_info(f"OneXPlayer Apex SteamOS Tools starting ({BUILD_ID})")
         _log_info(f"Plugin dir: {decky.DECKY_PLUGIN_DIR}")
         _log_info(f"Log dir: {decky.DECKY_PLUGIN_LOG_DIR}")
 
@@ -221,7 +260,8 @@ class Plugin:
             try:
                 result = await asyncio.to_thread(xhci_check_and_recover)
                 if result.get("needed") and result.get("success"):
-                    _log_info("xHCI recovered")
+                    _log_info("xHCI recovered — restarting InputPlumber")
+                    await asyncio.to_thread(_restart_inputplumber)
                 elif result.get("needed") and not result.get("success"):
                     _log_error("xHCI recovery failed — gamepad may not work")
             except Exception as e:
@@ -229,7 +269,7 @@ class Plugin:
 
     async def _unload(self):
         """Plugin teardown — called by Decky on unload."""
-        _log_info("OneXPlayer Apex Tools unloading")
+        _log_info("OneXPlayer Apex SteamOS Tools unloading")
         # Stop test sound if playing
         if stop_test_sound_impl:
             try:
@@ -455,8 +495,11 @@ class Plugin:
             if result.get("already_ok"):
                 return {"success": True, "message": "Gamepad already connected"}
             if result.get("success"):
-                return {"success": True, "message": "Gamepad recovered"}
-            return {"success": False, "error": "Recovery failed — gamepad not detected after rebind"}
+                await asyncio.to_thread(_restart_inputplumber)
+                pci = result.get("pci_device", "controller")
+                return {"success": True, "message": f"Gamepad recovered (rebound {pci})"}
+            missing = ", ".join(result.get("missing") or []) or "the internal hub"
+            return {"success": False, "error": f"Recovery failed — still missing: {missing}"}
         except Exception as e:
             _log_error(f"Gamepad recovery exception: {e}")
             return {"success": False, "error": str(e)}

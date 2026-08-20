@@ -89,7 +89,7 @@ export const FixesSection: FC<{
           <PanelSectionRow>
             <ButtonItem
               layout="below"
-              description="Rebind the internal USB controller if the gamepad is missing"
+              description="Rebind the internal USB controller and restart InputPlumber if the gamepad is missing"
               disabled={loading.active === "recoverGamepad"}
               onClick={handleRecoverGamepad}
             >
