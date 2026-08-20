@@ -10,9 +10,9 @@ When this happens, the gamepad disappears and HHD can't create a virtual
 controller. This module detects a dead xHCI and rebinds it on plugin startup.
 """
 
+import glob
 import logging
 import os
-import subprocess
 import time
 
 logger = logging.getLogger("OXP-xHCIRecovery")
@@ -61,23 +61,33 @@ _VENDOR_HID_ID = "1a86:fe00"
 _XBOX_GAMEPAD_ID = "045e:028e"
 
 
-def _clean_env():
-    env = os.environ.copy()
-    for var in ("LD_LIBRARY_PATH", "LD_PRELOAD"):
-        env.pop(var, None)
-    return env
+_USB_DEVICES = "/sys/bus/usb/devices"
+
+
+def _read(path):
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+def find_usb_device(vid_pid):
+    """Return the sysfs path of an enumerated USB device, or None.
+
+    Reads sysfs directly rather than shelling out to lsusb: no dependency on
+    usbutils, and it works before any userspace tooling is up.
+    """
+    vid, pid = vid_pid.split(":")
+    for path in sorted(glob.glob(f"{_USB_DEVICES}/*")):
+        if _read(f"{path}/idVendor") == vid and _read(f"{path}/idProduct") == pid:
+            return path
+    return None
 
 
 def _usb_device_present(vid_pid):
     """Check if a USB device with the given VID:PID is enumerated."""
-    try:
-        r = subprocess.run(
-            ["lsusb", "-d", vid_pid],
-            capture_output=True, text=True, timeout=5, env=_clean_env()
-        )
-        return r.returncode == 0 and vid_pid in r.stdout
-    except Exception:
-        return False
+    return find_usb_device(vid_pid) is not None
 
 
 def _xhci_bound():
