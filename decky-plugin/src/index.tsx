@@ -2,13 +2,14 @@ import { useState, useEffect, useCallback, FC } from "react";
 import { PanelSection, PanelSectionRow, staticClasses } from "@decky/ui";
 import { definePlugin } from "@decky/api";
 import { BUILD_ID } from "./build_info";
-import type { SpeakerDSPStatus, ResumeFixStatus, LoadingState, ResultMessage } from "./types";
+import type { SpeakerDSPStatus, ResumeFixStatus, PlatformStatus, LoadingState, ResultMessage } from "./types";
 import { getStatus } from "./rpc";
 import { SpeakerDSPSection } from "./SpeakerDSPSection";
 import { FixesSection } from "./FixesSection";
 import { LogsSection } from "./LogsSection";
 
 const Content: FC = () => {
+  const [platform, setPlatform] = useState<PlatformStatus>({ supported: true });
   const [speakerDSP, setSpeakerDSP] = useState<SpeakerDSPStatus>({ enabled: false });
   const [resumeFix, setResumeFix] = useState<ResumeFixStatus>({ applied: false });
   const [statusLoaded, setStatusLoaded] = useState(false);
@@ -23,6 +24,7 @@ const Content: FC = () => {
   const refresh = useCallback(async () => {
     try {
       const status = await getStatus();
+      setPlatform(status.platform);
       setSpeakerDSP(status.speaker_dsp);
       setResumeFix(status.resume_fix);
     } catch (e) {
@@ -53,8 +55,17 @@ const Content: FC = () => {
               color: "#ffcc00",
             }}
           >
-            <strong>Use at your own risk.</strong> This plugin modifies system files and hardware
-            settings, and may need re-applying after a SteamOS update.
+            {platform.supported ? (
+              <>
+                <strong>Use at your own risk.</strong> This plugin modifies system files and
+                hardware settings, and may need re-applying after a SteamOS update.
+              </>
+            ) : (
+              <>
+                <strong>Unsupported platform.</strong> {platform.reason}. Nothing will run
+                automatically. On Bazzite, use the upstream plugin instead.
+              </>
+            )}
           </div>
         </PanelSectionRow>
       </PanelSection>

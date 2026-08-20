@@ -115,6 +115,50 @@ def _get_user_home():
     return os.path.expanduser("~")
 
 
+# This plugin targets SteamOS on the OneXPlayer Apex only. On Bazzite, use the
+# upstream plugin instead — it ships the HHD-era fixes this fork removed.
+_EXPECTED_OS_ID = "steamos"
+_EXPECTED_PRODUCT = "ONEXPLAYER APEX"
+
+
+def _read_first_line(path):
+    try:
+        with open(path) as f:
+            return f.readline().strip()
+    except OSError:
+        return ""
+
+
+def _read_os_id():
+    try:
+        with open("/etc/os-release") as f:
+            for line in f:
+                if line.startswith("ID="):
+                    return line[3:].strip().strip('"')
+    except OSError:
+        pass
+    return ""
+
+
+def check_platform():
+    """Check that we are on SteamOS on an Apex.
+
+    Returns a dict with `supported`, plus the values read so the frontend can
+    show what was actually detected.
+    """
+    os_id = _read_os_id()
+    product = _read_first_line("/sys/devices/virtual/dmi/id/product_name")
+
+    if os_id != _EXPECTED_OS_ID:
+        reason = f"This plugin targets SteamOS; detected '{os_id or 'unknown'}'"
+    elif product != _EXPECTED_PRODUCT:
+        reason = f"This plugin targets the {_EXPECTED_PRODUCT}; detected '{product or 'unknown'}'"
+    else:
+        reason = None
+
+    return {"supported": reason is None, "reason": reason, "os_id": os_id, "product": product}
+
+
 # Log file path — write to Decky's plugin log directory
 LOG_FILE = os.path.join(decky.DECKY_PLUGIN_LOG_DIR, "oxp-apex.log")
 
@@ -165,6 +209,12 @@ class Plugin:
         _log_info(f"Plugin dir: {decky.DECKY_PLUGIN_DIR}")
         _log_info(f"Log dir: {decky.DECKY_PLUGIN_LOG_DIR}")
 
+        platform = check_platform()
+        if not platform["supported"]:
+            _log_error(f"Unsupported platform — {platform['reason']}. Skipping all automatic actions.")
+            return
+        _log_info(f"Platform OK: {platform['os_id']} on {platform['product']}")
+
         # Recover the xHCI controller if the internal gamepad USB devices are
         # missing (the internal hub sometimes drops during boot on the Apex)
         if xhci_check_and_recover:
@@ -192,6 +242,7 @@ class Plugin:
     async def get_status(self):
         """Get combined status of all features — called by the frontend on load."""
         return {
+            "platform": check_platform(),
             "speaker_dsp": speaker_dsp_status() if speaker_dsp_status else {"enabled": False, "profile": None, "speaker_node": None},
             "resume_fix": resume_fix_status() if resume_fix_status else {"applied": False, "error": "module not loaded"},
         }

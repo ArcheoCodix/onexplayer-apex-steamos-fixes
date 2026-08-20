@@ -14,7 +14,15 @@ export interface ResumeFixStatus {
   error?: string;
 }
 
+export interface PlatformStatus {
+  supported: boolean;
+  reason?: string | null;
+  os_id?: string;
+  product?: string;
+}
+
 export interface StatusResponse {
+  platform: PlatformStatus;
   speaker_dsp: SpeakerDSPStatus;
   resume_fix: ResumeFixStatus;
 }
