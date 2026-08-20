@@ -4,7 +4,10 @@ Installs a dbus-monitor daemon that listens for sleep/resume events and
 rebinds the xHCI USB controller to recover the gamepad after sleep.
 
 Based on the xpad-fix3 package from the Korean OXP community.
-PCI device 0000:65:00.4 is the xHCI controller connected to the gamepad.
+
+The xHCI controller's PCI address depends on the Apex firmware version, so the
+generated script discovers it on every resume rather than having it baked in at
+install time — that way the service survives a firmware update.
 """
 
 import logging
@@ -12,6 +15,13 @@ import os
 import subprocess
 
 logger = logging.getLogger("OXP-ResumeFix")
+
+# Shared with xhci_recovery so the two modules cannot disagree on which
+# controller is the internal one. Optional: this module still works without it.
+try:
+    from xhci_recovery import find_internal_xhci
+except Exception:  # pragma: no cover
+    find_internal_xhci = None
 
 _log_info_cb = None
 _log_error_cb = None
@@ -56,40 +66,80 @@ def _clean_env():
 _SCRIPT_PATH = "/usr/local/sbin/apex-resume-recover.sh"
 _SERVICE_NAME = "apex-resume-recover.service"
 _SERVICE_PATH = f"/etc/systemd/system/{_SERVICE_NAME}"
-_PCI_DEVICE = "0000:65:00.4"
-_PCI_DRIVER_PATH = f"/sys/bus/pci/devices/{_PCI_DEVICE}/driver"
 
-_SCRIPT_CONTENT = f"""#!/bin/bash
+# Not an f-string: every brace below is literal shell.
+_SCRIPT_CONTENT = r"""#!/bin/bash
 # OneXPlayer Apex — Gamepad recovery after sleep
 # Listens for resume events via dbus and rebinds the xHCI controller.
 # Based on xpad-fix3 from the Korean OXP community.
+#
+# The controller's PCI address depends on the Apex firmware version, not on the
+# model, so it is resolved on every resume rather than hardcoded. That also
+# means the service keeps working across a firmware update.
 
-XHCI_PCI="{_PCI_DEVICE}"
-XHCI_DRIVER="/sys/bus/pci/devices/$XHCI_PCI/driver"
+# The internal hub the gamepad, buttons and keyboard all hang off
+HUB_VID=1a86
+HUB_PID=8091
+# The bus that hub lives on, used only once the hub itself is gone
+HUB_BUS=usb1
 
-recover_gamepad() {{
+find_xhci() {
+    local d hub=""
+
+    # 1. The hub is present: walk its sysfs path up to the controller
+    for d in /sys/bus/usb/devices/*/; do
+        [ "$(cat "$d/idVendor" 2>/dev/null)" = "$HUB_VID" ] || continue
+        [ "$(cat "$d/idProduct" 2>/dev/null)" = "$HUB_PID" ] || continue
+        hub="$d"
+        break
+    done
+    if [ -n "$hub" ]; then
+        readlink -f "$hub" | grep -oE '0000:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9]' | tail -1
+        return
+    fi
+
+    # 2. The hub is gone: fall back to the controller owning its bus, which
+    #    stays bound when only the hub drops
+    for d in /sys/bus/pci/drivers/xhci_hcd/0000:*/; do
+        if [ -d "$d$HUB_BUS" ]; then
+            basename "$d"
+            return
+        fi
+    done
+}
+
+recover_gamepad() {
+    local xhci_pci xhci_driver
     logger -t apex-resume-recover "Resume detected — recovering gamepad"
+
+    xhci_pci=$(find_xhci)
+    if [ -z "$xhci_pci" ]; then
+        logger -t apex-resume-recover "No xHCI controller found — cannot recover"
+        return
+    fi
+    logger -t apex-resume-recover "Using xHCI controller $xhci_pci"
+    xhci_driver="/sys/bus/pci/devices/$xhci_pci/driver"
 
     # Phase 1: quick recovery (1s delay)
     sleep 1
-    if [ -e "$XHCI_DRIVER" ]; then
-        echo "$XHCI_PCI" > "$XHCI_DRIVER/unbind" 2>/dev/null
+    if [ -e "$xhci_driver" ]; then
+        echo "$xhci_pci" > "$xhci_driver/unbind" 2>/dev/null
         sleep 0.5
     fi
-    echo "$XHCI_PCI" > /sys/bus/pci/drivers/xhci_hcd/bind 2>/dev/null
+    echo "$xhci_pci" > /sys/bus/pci/drivers/xhci_hcd/bind 2>/dev/null
 
     # Phase 2: fallback if phase 1 didn't work (2s delay)
     sleep 2
-    if [ ! -e "$XHCI_DRIVER" ]; then
+    if [ ! -e "$xhci_driver" ]; then
         logger -t apex-resume-recover "Phase 1 failed, retrying bind"
-        echo "$XHCI_PCI" > /sys/bus/pci/drivers/xhci_hcd/bind 2>/dev/null
+        echo "$xhci_pci" > /sys/bus/pci/drivers/xhci_hcd/bind 2>/dev/null
     fi
 
     logger -t apex-resume-recover "Recovery complete"
-}}
+}
 
 # Monitor dbus for resume events
-dbus-monitor --system "type='signal',interface='org.freedesktop.login1.Manager',member='PrepareForSleep'" | \\
+dbus-monitor --system "type='signal',interface='org.freedesktop.login1.Manager',member='PrepareForSleep'" | \
 while read -r line; do
     if echo "$line" | grep -q "boolean false"; then
         recover_gamepad &
@@ -113,16 +163,26 @@ WantedBy=multi-user.target
 """
 
 
-def _pci_device_exists():
-    """Check if the target PCI device exists."""
-    return os.path.exists(f"/sys/bus/pci/devices/{_PCI_DEVICE}")
+def _find_pci_device():
+    """Locate the internal xHCI controller, for status reporting only.
+
+    The generated script does its own discovery at resume time; this is just so
+    the UI can show which controller was found.
+    """
+    if not find_internal_xhci:
+        return None
+    try:
+        pci_device, _how = find_internal_xhci()
+        return pci_device
+    except Exception:
+        return None
 
 
 def is_applied():
     """Check current status of the resume recovery fix."""
     service_exists = os.path.exists(_SERVICE_PATH)
     script_exists = os.path.exists(_SCRIPT_PATH)
-    pci_exists = _pci_device_exists()
+    pci_device = _find_pci_device()
 
     service_active = False
     service_enabled = False
@@ -151,7 +211,8 @@ def is_applied():
         "service_active": service_active,
         "service_enabled": service_enabled,
         "script_exists": script_exists,
-        "pci_device_exists": pci_exists,
+        "pci_device_exists": pci_device is not None,
+        "pci_device": pci_device,
     }
 
 
@@ -164,9 +225,13 @@ def apply():
     if status.get("applied"):
         return {"success": True, "message": "Already applied", "steps": ["Already applied"]}
 
-    if not _pci_device_exists():
-        _log_warning(f"PCI device {_PCI_DEVICE} not found — service may not work")
-        steps.append(f"Warning: PCI device {_PCI_DEVICE} not found")
+    pci_device = _find_pci_device()
+    if pci_device:
+        _log_info(f"Internal xHCI controller found at {pci_device}")
+        steps.append(f"xHCI controller: {pci_device}")
+    else:
+        _log_warning("No internal xHCI controller found — service may not work")
+        steps.append("Warning: no internal xHCI controller found")
 
     # Write recovery script
     try:
