@@ -2,27 +2,15 @@ import { useState, useEffect, useCallback, FC } from "react";
 import { PanelSection, PanelSectionRow, staticClasses } from "@decky/ui";
 import { definePlugin } from "@decky/api";
 import { BUILD_ID } from "./build_info";
-import type { SpeakerDSPStatus, OxpecStatus, ResumeFixStatus, SleepEnableStatus, LightSleepStatus, LoadingState, ResultMessage } from "./types";
+import type { SpeakerDSPStatus, ResumeFixStatus, LoadingState, ResultMessage } from "./types";
 import { getStatus } from "./rpc";
 import { SpeakerDSPSection } from "./SpeakerDSPSection";
 import { FixesSection } from "./FixesSection";
 import { LogsSection } from "./LogsSection";
 
 const Content: FC = () => {
-  const [buttonFix, setButtonFix] = useState<{ applied: boolean; error?: string; home_monitor_running?: boolean; paddle_monitor_running?: boolean }>({
-    applied: false,
-  });
-  const [lightSleep, setLightSleep] = useState<LightSleepStatus>({
-    applied: false,
-    light_sleep_present: [],
-    light_sleep_missing: [],
-    problematic_kargs: [],
-    has_problematic_kargs: false,
-  });
   const [speakerDSP, setSpeakerDSP] = useState<SpeakerDSPStatus>({ enabled: false });
-  const [oxpec, setOxpec] = useState<OxpecStatus>({ applied: false });
   const [resumeFix, setResumeFix] = useState<ResumeFixStatus>({ applied: false });
-  const [sleepEnable, setSleepEnable] = useState<SleepEnableStatus>({ applied: false });
   const [statusLoaded, setStatusLoaded] = useState(false);
   const [loading, setLoading] = useState<LoadingState>({ active: null, message: "" });
   const [result, setResult] = useState<ResultMessage | null>(null);
@@ -35,12 +23,8 @@ const Content: FC = () => {
   const refresh = useCallback(async () => {
     try {
       const status = await getStatus();
-      setButtonFix(status.button_fix);
-      setLightSleep(status.light_sleep);
       setSpeakerDSP(status.speaker_dsp);
-      setOxpec(status.oxpec);
       setResumeFix(status.resume_fix);
-      setSleepEnable(status.sleep_enable);
     } catch (e) {
       console.error("Failed to get status:", e);
     } finally {
@@ -70,22 +54,14 @@ const Content: FC = () => {
             }}
           >
             <strong>Use at your own risk.</strong> This plugin modifies system files and hardware
-            settings. Fixes will not persist across Bazzite updates and must be re-applied.
+            settings, and may need re-applying after a SteamOS update.
           </div>
         </PanelSectionRow>
       </PanelSection>
 
       <FixesSection
-        buttonFix={buttonFix}
-        setButtonFix={setButtonFix}
-        lightSleep={lightSleep}
-        setLightSleep={setLightSleep}
-        oxpec={oxpec}
-        setOxpec={setOxpec}
         resumeFix={resumeFix}
         setResumeFix={setResumeFix}
-        sleepEnable={sleepEnable}
-        setSleepEnable={setSleepEnable}
         loading={loading}
         setLoading={setLoading}
         showResult={showResult}

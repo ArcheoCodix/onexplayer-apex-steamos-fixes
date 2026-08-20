@@ -1,8 +1,7 @@
 """OneXPlayer Apex Tools — Decky Loader plugin backend.
 
-Exposes methods for button fix, home button monitor, EC sensor driver,
-resume recovery, sleep enablement, and speaker DSP to the frontend
-via Decky's RPC bridge.
+Exposes methods for gamepad recovery, resume recovery, and speaker DSP to
+the frontend via Decky's RPC bridge.
 
 Each async method in the Plugin class becomes an RPC endpoint that
 the React frontend can call via @decky/api's `callable()`.
@@ -10,7 +9,6 @@ the React frontend can call via @decky/api's `callable()`.
 
 import asyncio
 import os
-import subprocess
 import sys
 
 # Official Decky module — injected by the loader at runtime.
@@ -22,44 +20,6 @@ sys.path.insert(0, os.path.join(decky.DECKY_PLUGIN_DIR, "py_modules"))
 
 # Import helper modules with error handling so a single broken module
 # doesn't crash the entire plugin on load.
-
-try:
-    import button_fix as _button_fix_mod
-    from button_fix import (
-        apply as apply_button_fix_impl,
-        revert as revert_button_fix_impl,
-        is_applied as button_fix_status,
-    )
-except Exception as e:
-    decky.logger.error(f"Failed to import button_fix: {e}")
-    _button_fix_mod = None
-    apply_button_fix_impl = None
-    revert_button_fix_impl = None
-    button_fix_status = None
-
-try:
-    import back_paddle as _back_paddle_mod
-    from back_paddle import BackPaddleMonitor
-except Exception as e:
-    decky.logger.error(f"Failed to import back_paddle: {e}")
-    _back_paddle_mod = None
-    BackPaddleMonitor = None
-
-try:
-    import sleep_fix as _sleep_fix_mod
-    from sleep_fix import (
-        get_status as sleep_fix_status,
-        apply as apply_light_sleep_impl,
-        revert as revert_light_sleep_impl,
-        remove as remove_sleep_fix_impl,
-    )
-except Exception as e:
-    decky.logger.error(f"Failed to import sleep_fix: {e}")
-    _sleep_fix_mod = None
-    sleep_fix_status = None
-    apply_light_sleep_impl = None
-    revert_light_sleep_impl = None
-    remove_sleep_fix_impl = None
 
 try:
     import speaker_dsp as _speaker_dsp_mod
@@ -98,30 +58,6 @@ except Exception as e:
     is_bypassed_speaker_dsp_impl = None
 
 try:
-    import home_button as _home_button_mod
-    from home_button import HomeButtonMonitor
-except Exception as e:
-    decky.logger.error(f"Failed to import home_button: {e}")
-    _home_button_mod = None
-    HomeButtonMonitor = None
-
-try:
-    import oxpec_loader as _oxpec_mod
-    from oxpec_loader import (
-        apply as apply_oxpec_impl,
-        revert as revert_oxpec_impl,
-        is_applied as oxpec_status,
-        ensure_loaded as ensure_oxpec_loaded,
-    )
-except Exception as e:
-    decky.logger.error(f"Failed to import oxpec_loader: {e}")
-    _oxpec_mod = None
-    apply_oxpec_impl = None
-    revert_oxpec_impl = None
-    oxpec_status = None
-    ensure_oxpec_loaded = None
-
-try:
     import resume_fix as _resume_fix_mod
     from resume_fix import (
         apply as apply_resume_fix_impl,
@@ -143,22 +79,6 @@ except Exception as e:
     _xhci_recovery_mod = None
     xhci_check_and_recover = None
 
-try:
-    import sleep_enable as _sleep_enable_mod
-    from sleep_enable import (
-        apply as apply_sleep_enable_impl,
-        revert as revert_sleep_enable_impl,
-        is_applied as sleep_enable_status,
-    )
-except Exception as e:
-    decky.logger.error(f"Failed to import sleep_enable: {e}")
-    _sleep_enable_mod = None
-    apply_sleep_enable_impl = None
-    revert_sleep_enable_impl = None
-    sleep_enable_status = None
-
-
-
 
 def _get_user_home():
     """Get the real (non-root) user's home directory.
@@ -174,7 +94,7 @@ def _get_user_home():
         if os.path.isdir(home):
             return home
 
-    # Infer from Decky plugin dir path (e.g. /home/srsholmes/homebrew/plugins/...)
+    # Infer from Decky plugin dir path (e.g. /home/deck/homebrew/plugins/...)
     plugin_dir = decky.DECKY_PLUGIN_DIR
     if plugin_dir.startswith("/home/"):
         parts = plugin_dir.split("/")
@@ -226,68 +146,15 @@ def _log_warning(msg: str):
 
 
 # Wire log callbacks into helper modules so their logs appear in oxp-apex.log
-if _button_fix_mod:
-    _button_fix_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
-if _back_paddle_mod:
-    _back_paddle_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
-if _home_button_mod:
-    _home_button_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
 if _speaker_dsp_mod:
     _speaker_dsp_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
-if _oxpec_mod:
-    _oxpec_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
 if _resume_fix_mod:
     _resume_fix_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
-if _sleep_fix_mod:
-    _sleep_fix_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
-if _sleep_enable_mod:
-    _sleep_enable_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
 if _xhci_recovery_mod:
     _xhci_recovery_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
 
 
-def _clean_env():
-    """Strip Decky's LD_LIBRARY_PATH/LD_PRELOAD for subprocess calls."""
-    env = os.environ.copy()
-    for var in ("LD_LIBRARY_PATH", "LD_PRELOAD"):
-        env.pop(var, None)
-    return env
-
-
-def _restart_hhd():
-    """Restart HHD so it re-detects hardware (e.g. after loading oxpec)."""
-    _log_info("Restarting HHD to pick up new hardware...")
-    try:
-        r = subprocess.run(
-            ["systemctl", "list-units", "--plain", "--no-legend", "--type=service", "hhd*"],
-            capture_output=True, text=True, timeout=10, env=_clean_env()
-        )
-        units = []
-        for line in r.stdout.strip().splitlines():
-            parts = line.split()
-            if parts:
-                units.append(parts[0])
-        if not units:
-            units = ["hhd"]
-        for unit in units:
-            r = subprocess.run(
-                ["systemctl", "restart", unit],
-                capture_output=True, text=True, timeout=30, env=_clean_env()
-            )
-            if r.returncode == 0:
-                _log_info(f"Restarted {unit}")
-            else:
-                _log_error(f"Failed to restart {unit}: {r.stderr.strip()}")
-    except Exception as e:
-        _log_error(f"HHD restart failed: {e}")
-
-
 class Plugin:
-    # Home button HID monitor instance
-    home_monitor = None
-    # Back paddle firmware remap monitor instance
-    paddle_monitor = None
-
     async def _main(self):
         """Plugin entry point — called by Decky on load."""
         try:
@@ -298,55 +165,17 @@ class Plugin:
         _log_info(f"Plugin dir: {decky.DECKY_PLUGIN_DIR}")
         _log_info(f"Log dir: {decky.DECKY_PLUGIN_LOG_DIR}")
 
-        # Create monitor instances (started automatically with button fix)
-        if HomeButtonMonitor:
-            self.home_monitor = HomeButtonMonitor()
-        else:
-            _log_warning("home_button module not available")
-        if BackPaddleMonitor:
-            self.paddle_monitor = BackPaddleMonitor()
-        else:
-            _log_warning("back_paddle module not available")
-
-        # Recover xHCI controller if internal gamepad USB devices are missing
-        # (xHCI 0000:65:00.4 sometimes dies during boot on the Apex)
-        hhd_restart_needed = False
+        # Recover the xHCI controller if the internal gamepad USB devices are
+        # missing (the internal hub sometimes drops during boot on the Apex)
         if xhci_check_and_recover:
             try:
                 result = await asyncio.to_thread(xhci_check_and_recover)
                 if result.get("needed") and result.get("success"):
-                    _log_info("xHCI recovered — will restart HHD")
-                    hhd_restart_needed = True
+                    _log_info("xHCI recovered")
                 elif result.get("needed") and not result.get("success"):
                     _log_error("xHCI recovery failed — gamepad may not work")
             except Exception as e:
                 _log_error(f"xHCI recovery check failed: {e}")
-
-        # Auto-load oxpec driver if not already loaded (survives reboots
-        # even when hotfix overlay is lost since plugin runs on every boot)
-        if ensure_oxpec_loaded:
-            try:
-                result = ensure_oxpec_loaded()
-                if result.get("success") and result.get("loaded"):
-                    method = result.get("method", "unknown")
-                    _log_info(f"oxpec auto-loaded via {method}")
-                    hhd_restart_needed = True
-                elif result.get("already_loaded"):
-                    _log_info("oxpec already loaded")
-            except Exception as e:
-                _log_error(f"oxpec auto-load failed: {e}")
-
-        if hhd_restart_needed:
-            _log_info("Restarting HHD to pick up recovered hardware")
-            _restart_hhd()
-
-        # Auto-start monitors if button fix is already applied
-        if button_fix_status:
-            status = button_fix_status()
-            if status.get("applied"):
-                _log_info("Button fix already applied — auto-starting monitors")
-                self._start_home_monitor()
-                self._start_paddle_monitor()
 
     async def _unload(self):
         """Plugin teardown — called by Decky on unload."""
@@ -357,26 +186,14 @@ class Plugin:
                 stop_test_sound_impl()
             except Exception:
                 pass
-        # Stop monitors if active
-        if self.paddle_monitor:
-            await self.paddle_monitor.stop()
-        if self.home_monitor:
-            await self.home_monitor.stop()
 
     # -- Status overview --
 
     async def get_status(self):
         """Get combined status of all features — called by the frontend on load."""
-        bf_status = button_fix_status() if button_fix_status else {"applied": False, "error": "module not loaded"}
-        bf_status["home_monitor_running"] = self.home_monitor.is_running if self.home_monitor else False
-        bf_status["paddle_monitor_running"] = self.paddle_monitor.is_running if self.paddle_monitor else False
         return {
-            "button_fix": bf_status,
-            "light_sleep": sleep_fix_status() if sleep_fix_status else {"applied": False, "has_problematic_kargs": False, "problematic_kargs": [], "light_sleep_present": [], "light_sleep_missing": []},
             "speaker_dsp": speaker_dsp_status() if speaker_dsp_status else {"enabled": False, "profile": None, "speaker_node": None},
-            "oxpec": oxpec_status() if oxpec_status else {"applied": False, "error": "module not loaded"},
             "resume_fix": resume_fix_status() if resume_fix_status else {"applied": False, "error": "module not loaded"},
-            "sleep_enable": sleep_enable_status() if sleep_enable_status else {"applied": False, "error": "module not loaded"},
         }
 
     # -- Logs --
@@ -406,95 +223,6 @@ class Plugin:
             return {"success": True, "path": dest}
         except Exception as e:
             _log_error(f"Failed to save logs: {e}")
-            return {"success": False, "error": str(e)}
-
-    # -- Button Fix --
-    # Patches HHD (Handheld Daemon) to recognize Apex face buttons.
-    # Requires ostree filesystem unlock since Bazzite is immutable.
-
-    async def get_button_fix_status(self):
-        if not button_fix_status:
-            return {"applied": False, "error": "module not loaded"}
-        return button_fix_status()
-
-    async def apply_button_fix(self):
-        if not apply_button_fix_impl:
-            return {"success": False, "error": "button_fix module not loaded"}
-        _log_info("Applying button fix...")
-        try:
-            result = await asyncio.to_thread(apply_button_fix_impl)
-            if result.get("success"):
-                _log_info(f"Button fix applied: {result.get('message', 'OK')}")
-                self._start_home_monitor()
-                self._start_paddle_monitor()
-            else:
-                _log_error(f"Button fix failed: {result.get('error', 'unknown')}")
-            return result
-        except Exception as e:
-            _log_error(f"Button fix exception: {e}")
-            return {"success": False, "error": str(e)}
-
-    async def revert_button_fix(self):
-        if not revert_button_fix_impl:
-            return {"success": False, "error": "button_fix module not loaded"}
-        _log_info("Reverting button fix...")
-        try:
-            await self._stop_paddle_monitor()
-            await self._stop_home_monitor()
-            result = await asyncio.to_thread(revert_button_fix_impl)
-            if result.get("success"):
-                _log_info(f"Button fix reverted: {result.get('message', 'OK')}")
-            else:
-                _log_error(f"Button fix revert failed: {result.get('error', 'unknown')}")
-            return result
-        except Exception as e:
-            _log_error(f"Button fix revert exception: {e}")
-            return {"success": False, "error": str(e)}
-
-    # -- Light Sleep (s2idle kargs) --
-
-    async def get_light_sleep_status(self):
-        if not sleep_fix_status:
-            return {"applied": False, "has_problematic_kargs": False, "problematic_kargs": [], "light_sleep_present": [], "light_sleep_missing": []}
-        return sleep_fix_status()
-
-    async def apply_light_sleep(self):
-        if not apply_light_sleep_impl:
-            return {"success": False, "error": "sleep_fix module not loaded"}
-        _log_info("Applying light sleep kargs...")
-        try:
-            result = await asyncio.to_thread(apply_light_sleep_impl)
-            if result.get("success"):
-                _log_info(f"Light sleep applied: {result.get('message', 'OK')}")
-            else:
-                _log_error(f"Light sleep failed: {result.get('error', 'unknown')}")
-            return result
-        except Exception as e:
-            _log_error(f"Light sleep exception: {e}")
-            return {"success": False, "error": str(e)}
-
-    async def revert_light_sleep(self):
-        if not revert_light_sleep_impl:
-            return {"success": False, "error": "sleep_fix module not loaded"}
-        _log_info("Reverting light sleep kargs...")
-        try:
-            result = await asyncio.to_thread(revert_light_sleep_impl)
-            if result.get("success"):
-                _log_info(f"Light sleep reverted: {result.get('message', 'OK')}")
-            else:
-                _log_error(f"Light sleep revert failed: {result.get('error', 'unknown')}")
-            return result
-        except Exception as e:
-            _log_error(f"Light sleep revert exception: {e}")
-            return {"success": False, "error": str(e)}
-
-    # Legacy compat — old frontend called remove_sleep_fix
-    async def remove_sleep_fix(self):
-        if not remove_sleep_fix_impl:
-            return {"success": False, "error": "sleep_fix module not loaded"}
-        try:
-            return await asyncio.to_thread(remove_sleep_fix_impl)
-        except Exception as e:
             return {"success": False, "error": str(e)}
 
     # -- Speaker DSP --
@@ -537,21 +265,21 @@ class Plugin:
     async def set_dsp_profile(self, profile):
         if not set_dsp_profile_impl:
             return {"success": False, "error": "speaker_dsp module not loaded"}
-        _log_info(f"Switching speaker DSP profile to {profile}...")
+        _log_info(f"Setting DSP profile to {profile}...")
         try:
             result = await asyncio.to_thread(set_dsp_profile_impl, profile)
             if result.get("success"):
-                _log_info(f"Speaker DSP profile set: {result.get('message', 'OK')}")
+                _log_info(f"DSP profile set: {result.get('message', 'OK')}")
             else:
-                _log_error(f"Speaker DSP profile switch failed: {result.get('error', 'unknown')}")
+                _log_error(f"DSP profile set failed: {result.get('error', 'unknown')}")
             return result
         except Exception as e:
-            _log_error(f"Speaker DSP profile exception: {e}")
+            _log_error(f"DSP profile exception: {e}")
             return {"success": False, "error": str(e)}
 
     async def list_dsp_profiles(self):
         if not list_dsp_profiles_impl:
-            return {}
+            return []
         return list_dsp_profiles_impl()
 
     async def get_preset_bands(self, profile_name):
@@ -567,10 +295,8 @@ class Plugin:
     async def save_custom_profile(self, name, gains):
         if not save_custom_profile_impl:
             return {"success": False, "error": "speaker_dsp module not loaded"}
-        _log_info(f"Saving custom EQ profile: {name}")
         try:
-            result = await asyncio.to_thread(save_custom_profile_impl, name, gains)
-            return result
+            return await asyncio.to_thread(save_custom_profile_impl, name, gains)
         except Exception as e:
             _log_error(f"Save custom profile exception: {e}")
             return {"success": False, "error": str(e)}
@@ -578,10 +304,8 @@ class Plugin:
     async def delete_custom_profile(self, name):
         if not delete_custom_profile_impl:
             return {"success": False, "error": "speaker_dsp module not loaded"}
-        _log_info(f"Deleting custom EQ profile: {name}")
         try:
-            result = await asyncio.to_thread(delete_custom_profile_impl, name)
-            return result
+            return await asyncio.to_thread(delete_custom_profile_impl, name)
         except Exception as e:
             _log_error(f"Delete custom profile exception: {e}")
             return {"success": False, "error": str(e)}
@@ -631,83 +355,6 @@ class Plugin:
             _log_error(f"Is bypassed speaker DSP exception: {e}")
             return {"bypassed": False, "error": str(e)}
 
-    # -- Home Button Monitor (private — managed by button fix lifecycle) --
-
-    def _start_home_monitor(self):
-        if not self.home_monitor:
-            if HomeButtonMonitor:
-                self.home_monitor = HomeButtonMonitor()
-            else:
-                _log_warning("Cannot start home monitor — module not loaded")
-                return
-        if not self.home_monitor.is_running:
-            loop = asyncio.get_event_loop()
-            self.home_monitor.start(loop)
-            _log_info("Home button monitor started")
-
-    async def _stop_home_monitor(self):
-        if self.home_monitor and self.home_monitor.is_running:
-            await self.home_monitor.stop()
-            _log_info("Home button monitor stopped")
-
-    # -- Back Paddle Monitor (private — managed by button fix lifecycle) --
-
-    def _start_paddle_monitor(self):
-        if not self.paddle_monitor:
-            if BackPaddleMonitor:
-                self.paddle_monitor = BackPaddleMonitor()
-            else:
-                _log_warning("Cannot start paddle monitor — module not loaded")
-                return
-        if not self.paddle_monitor.is_running:
-            loop = asyncio.get_event_loop()
-            self.paddle_monitor.start(loop)
-            _log_info("Back paddle monitor started (firmware remap mode)")
-
-    async def _stop_paddle_monitor(self):
-        if self.paddle_monitor and self.paddle_monitor.is_running:
-            await self.paddle_monitor.stop()
-            _log_info("Back paddle monitor stopped")
-
-    # -- oxpec EC Sensor Driver --
-
-    async def get_oxpec_status(self):
-        if not oxpec_status:
-            return {"applied": False, "error": "module not loaded"}
-        return oxpec_status()
-
-    async def apply_oxpec(self):
-        if not apply_oxpec_impl:
-            return {"success": False, "error": "oxpec_loader module not loaded"}
-        _log_info("Installing oxpec driver...")
-        try:
-            result = await asyncio.to_thread(apply_oxpec_impl)
-            if result.get("success"):
-                _log_info(f"oxpec applied: {result.get('message', 'OK')}")
-                # Restart HHD so it detects the new hwmon for fan control
-                await asyncio.to_thread(_restart_hhd)
-            else:
-                _log_error(f"oxpec failed: {result.get('error', 'unknown')}")
-            return result
-        except Exception as e:
-            _log_error(f"oxpec exception: {e}")
-            return {"success": False, "error": str(e)}
-
-    async def revert_oxpec(self):
-        if not revert_oxpec_impl:
-            return {"success": False, "error": "oxpec_loader module not loaded"}
-        _log_info("Removing oxpec driver...")
-        try:
-            result = await asyncio.to_thread(revert_oxpec_impl)
-            if result.get("success"):
-                _log_info(f"oxpec reverted: {result.get('message', 'OK')}")
-            else:
-                _log_error(f"oxpec revert failed: {result.get('error', 'unknown')}")
-            return result
-        except Exception as e:
-            _log_error(f"oxpec revert exception: {e}")
-            return {"success": False, "error": str(e)}
-
     # -- Resume Recovery --
 
     async def get_resume_fix_status(self):
@@ -748,7 +395,7 @@ class Plugin:
     # -- xHCI Recovery (manual trigger) --
 
     async def recover_gamepad(self):
-        """Manually trigger xHCI rebind + HHD restart to recover the gamepad."""
+        """Manually trigger an xHCI rebind to recover the internal gamepad."""
         if not xhci_check_and_recover:
             return {"success": False, "error": "xhci_recovery module not loaded"}
         _log_info("Manual gamepad recovery triggered")
@@ -757,47 +404,8 @@ class Plugin:
             if result.get("already_ok"):
                 return {"success": True, "message": "Gamepad already connected"}
             if result.get("success"):
-                _log_info("xHCI recovered — restarting HHD")
-                _restart_hhd()
-                return {"success": True, "message": "Gamepad recovered and HHD restarted"}
+                return {"success": True, "message": "Gamepad recovered"}
             return {"success": False, "error": "Recovery failed — gamepad not detected after rebind"}
         except Exception as e:
             _log_error(f"Gamepad recovery exception: {e}")
-            return {"success": False, "error": str(e)}
-
-    # -- Sleep Enable --
-
-    async def get_sleep_enable_status(self):
-        if not sleep_enable_status:
-            return {"applied": False, "error": "module not loaded"}
-        return sleep_enable_status()
-
-    async def apply_sleep_enable(self):
-        if not apply_sleep_enable_impl:
-            return {"success": False, "error": "sleep_enable module not loaded"}
-        _log_info("Applying sleep enablement fix...")
-        try:
-            result = await asyncio.to_thread(apply_sleep_enable_impl)
-            if result.get("success"):
-                _log_info(f"Sleep enable applied: {result.get('message', 'OK')}")
-            else:
-                _log_error(f"Sleep enable failed: {result.get('error', 'unknown')}")
-            return result
-        except Exception as e:
-            _log_error(f"Sleep enable exception: {e}")
-            return {"success": False, "error": str(e)}
-
-    async def revert_sleep_enable(self):
-        if not revert_sleep_enable_impl:
-            return {"success": False, "error": "sleep_enable module not loaded"}
-        _log_info("Reverting sleep enablement fix...")
-        try:
-            result = await asyncio.to_thread(revert_sleep_enable_impl)
-            if result.get("success"):
-                _log_info(f"Sleep enable reverted: {result.get('message', 'OK')}")
-            else:
-                _log_error(f"Sleep enable revert failed: {result.get('error', 'unknown')}")
-            return result
-        except Exception as e:
-            _log_error(f"Sleep enable revert exception: {e}")
             return {"success": False, "error": str(e)}
