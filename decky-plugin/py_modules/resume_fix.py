@@ -103,6 +103,20 @@ chain_healthy() {
     return 0
 }
 
+# How long to give the chain to come back after a bind
+SETTLE_TIMEOUT=10
+
+wait_for_chain() {
+    # bash cannot compare floats, so count in quarter seconds
+    local quarters=0 limit=$((SETTLE_TIMEOUT * 4))
+    while ! chain_healthy; do
+        [ "$quarters" -ge "$limit" ] && return 1
+        sleep 0.25
+        quarters=$((quarters + 1))
+    done
+    return 0
+}
+
 find_xhci() {
     local d hub
 
@@ -141,22 +155,19 @@ recover_gamepad() {
     logger -t apex-resume-recover "Using xHCI controller $xhci_pci"
     xhci_driver="/sys/bus/pci/devices/$xhci_pci/driver"
 
-    # Phase 1: quick recovery (1s delay)
-    sleep 1
     if [ -e "$xhci_driver" ]; then
         echo "$xhci_pci" > "$xhci_driver/unbind" 2>/dev/null
-        sleep 0.5
+        sleep 1
     fi
     echo "$xhci_pci" > /sys/bus/pci/drivers/xhci_hcd/bind 2>/dev/null
 
-    # Phase 2: fallback if phase 1 didn't work (2s delay)
-    sleep 2
-    if [ ! -e "$xhci_driver" ]; then
-        logger -t apex-resume-recover "Phase 1 failed, retrying bind"
-        echo "$xhci_pci" > /sys/bus/pci/drivers/xhci_hcd/bind 2>/dev/null
+    # The devices come back one by one over two to three seconds, and how long
+    # exactly varies between resumes, so wait for them rather than guessing.
+    if wait_for_chain; then
+        logger -t apex-resume-recover "Internal chain is back"
+    else
+        logger -t apex-resume-recover "Chain did not come back within ${SETTLE_TIMEOUT}s"
     fi
-
-    logger -t apex-resume-recover "Recovery complete"
 }
 
 # Monitor dbus for resume events
