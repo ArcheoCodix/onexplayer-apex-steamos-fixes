@@ -1,9 +1,12 @@
 """Resume recovery fix for OneXPlayer Apex.
 
-Installs a dbus-monitor daemon that listens for sleep/resume events and
-rebinds the xHCI USB controller to recover the gamepad after sleep.
+Installs a oneshot systemd unit ordered after the sleep targets, so systemd
+itself runs the recovery script once per resume. The script rebinds the xHCI
+USB controller when the internal chain did not come back on its own, then
+restarts InputPlumber so it re-adopts the gamepad.
 
-Based on the xpad-fix3 package from the Korean OXP community.
+Originally based on the xpad-fix3 package from the Korean OXP community, which
+kept a dbus-monitor daemon running to catch the resume signal.
 
 The xHCI controller's PCI address depends on the Apex firmware version, so the
 generated script discovers it on every resume rather than having it baked in at
@@ -63,14 +66,23 @@ def _clean_env():
     return env
 
 
-_SCRIPT_PATH = "/usr/local/sbin/apex-resume-recover.sh"
+# /usr/local lives inside the read-only root subvolume on SteamOS: writing there
+# needs `steamos-readonly disable`, and the subvolume is replaced wholesale on
+# every OS update, so the script would silently vanish. /var is a separate
+# filesystem and /etc an overlay whose upper dir sits on it, so both are
+# writable as root and both survive an update.
+_STATE_DIR = "/var/lib/onexplayer-apex"
+_SCRIPT_PATH = f"{_STATE_DIR}/apex-resume-recover.sh"
+_LEGACY_SCRIPT_PATH = "/usr/local/sbin/apex-resume-recover.sh"
 _SERVICE_NAME = "apex-resume-recover.service"
 _SERVICE_PATH = f"/etc/systemd/system/{_SERVICE_NAME}"
 
 # Not an f-string: every brace below is literal shell.
 _SCRIPT_CONTENT = r"""#!/bin/bash
 # OneXPlayer Apex — Gamepad recovery after sleep
-# Listens for resume events via dbus and rebinds the xHCI controller.
+# Run once per resume by apex-resume-recover.service, which systemd orders
+# after the sleep targets. Rebinds the xHCI controller when the internal USB
+# chain did not come back.
 # Based on xpad-fix3 from the Korean OXP community.
 #
 # The controller's PCI address depends on the Apex firmware version, not on the
@@ -82,18 +94,46 @@ HUB_VID=1a86
 HUB_PID=8091
 # The bus that hub lives on, used only once the hub itself is gone
 HUB_BUS=usb1
+# The gamepad itself, the device a user actually notices going missing
+GAMEPAD_VID=045e
+GAMEPAD_PID=028e
+
+find_usb() {
+    local d
+    for d in /sys/bus/usb/devices/*/; do
+        [ "$(cat "$d/idVendor" 2>/dev/null)" = "$1" ] || continue
+        [ "$(cat "$d/idProduct" 2>/dev/null)" = "$2" ] || continue
+        printf '%s' "$d"
+        return 0
+    done
+    return 1
+}
+
+chain_healthy() {
+    find_usb "$HUB_VID" "$HUB_PID" >/dev/null || return 1
+    find_usb "$GAMEPAD_VID" "$GAMEPAD_PID" >/dev/null || return 1
+    return 0
+}
+
+# How long to give the chain to come back after a bind
+SETTLE_TIMEOUT=10
+
+wait_for_chain() {
+    # bash cannot compare floats, so count in quarter seconds
+    local quarters=0 limit=$((SETTLE_TIMEOUT * 4))
+    while ! chain_healthy; do
+        [ "$quarters" -ge "$limit" ] && return 1
+        sleep 0.25
+        quarters=$((quarters + 1))
+    done
+    return 0
+}
 
 find_xhci() {
-    local d hub=""
+    local d hub
 
     # 1. The hub is present: walk its sysfs path up to the controller
-    for d in /sys/bus/usb/devices/*/; do
-        [ "$(cat "$d/idVendor" 2>/dev/null)" = "$HUB_VID" ] || continue
-        [ "$(cat "$d/idProduct" 2>/dev/null)" = "$HUB_PID" ] || continue
-        hub="$d"
-        break
-    done
-    if [ -n "$hub" ]; then
+    if hub=$(find_usb "$HUB_VID" "$HUB_PID"); then
         readlink -f "$hub" | grep -oE '0000:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9]' | tail -1
         return
     fi
@@ -110,7 +150,14 @@ find_xhci() {
 
 recover_gamepad() {
     local xhci_pci xhci_driver
-    logger -t apex-resume-recover "Resume detected — recovering gamepad"
+
+    # Most resumes are fine. Rebinding one that worked tears down a healthy
+    # controller for no reason, so look before touching anything.
+    if chain_healthy; then
+        logger -t apex-resume-recover "Internal USB chain is healthy — nothing to do"
+        return
+    fi
+    logger -t apex-resume-recover "Internal chain is down — recovering gamepad"
 
     xhci_pci=$(find_xhci)
     if [ -z "$xhci_pci" ]; then
@@ -120,46 +167,48 @@ recover_gamepad() {
     logger -t apex-resume-recover "Using xHCI controller $xhci_pci"
     xhci_driver="/sys/bus/pci/devices/$xhci_pci/driver"
 
-    # Phase 1: quick recovery (1s delay)
-    sleep 1
     if [ -e "$xhci_driver" ]; then
         echo "$xhci_pci" > "$xhci_driver/unbind" 2>/dev/null
-        sleep 0.5
+        sleep 1
     fi
     echo "$xhci_pci" > /sys/bus/pci/drivers/xhci_hcd/bind 2>/dev/null
 
-    # Phase 2: fallback if phase 1 didn't work (2s delay)
-    sleep 2
-    if [ ! -e "$xhci_driver" ]; then
-        logger -t apex-resume-recover "Phase 1 failed, retrying bind"
-        echo "$xhci_pci" > /sys/bus/pci/drivers/xhci_hcd/bind 2>/dev/null
+    # The devices come back one by one over two to three seconds, and how long
+    # exactly varies between resumes, so wait for them rather than guessing.
+    if ! wait_for_chain; then
+        logger -t apex-resume-recover "Chain did not come back within ${SETTLE_TIMEOUT}s"
+        return
     fi
 
-    logger -t apex-resume-recover "Recovery complete"
+    # InputPlumber holds the source devices open and does not re-adopt them by
+    # itself after they are re-enumerated, so the gamepad stays absent from
+    # Steam until it is restarted. This is the SteamOS input daemon; upstream
+    # deliberately keeps this script free of any daemon knowledge.
+    logger -t apex-resume-recover "Internal chain is back — restarting InputPlumber"
+    if systemctl restart inputplumber.service 2>/dev/null; then
+        logger -t apex-resume-recover "Restarted inputplumber.service"
+    else
+        logger -t apex-resume-recover "Failed to restart inputplumber.service"
+    fi
 }
 
-# Monitor dbus for resume events
-dbus-monitor --system "type='signal',interface='org.freedesktop.login1.Manager',member='PrepareForSleep'" | \
-while read -r line; do
-    if echo "$line" | grep -q "boolean false"; then
-        recover_gamepad &
-    fi
-done
+recover_gamepad
 """
+
+# systemd reaches suspend.target on the way *out* of sleep, so a oneshot unit
+# ordered after it runs once per resume with no daemon in between.
+_SLEEP_TARGETS = "suspend.target hibernate.target suspend-then-hibernate.target"
 
 _SERVICE_CONTENT = f"""[Unit]
 Description=OneXPlayer Apex gamepad resume recovery
-After=dbus.service
-Wants=dbus.service
+After={_SLEEP_TARGETS}
 
 [Service]
-Type=simple
-ExecStart={_SCRIPT_PATH}
-Restart=always
-RestartSec=5
+Type=oneshot
+ExecStart=/bin/bash {_SCRIPT_PATH}
 
 [Install]
-WantedBy=multi-user.target
+WantedBy={_SLEEP_TARGETS}
 """
 
 
@@ -184,17 +233,10 @@ def is_applied():
     script_exists = os.path.exists(_SCRIPT_PATH)
     pci_device = _find_pci_device()
 
-    service_active = False
+    # No is-active check: the unit is Type=oneshot, so it reads as "inactive"
+    # at all times except the second or two it spends recovering.
     service_enabled = False
     if service_exists:
-        try:
-            r = subprocess.run(
-                ["systemctl", "is-active", _SERVICE_NAME],
-                capture_output=True, text=True, timeout=10, env=_clean_env()
-            )
-            service_active = r.stdout.strip() == "active"
-        except Exception:
-            pass
         try:
             r = subprocess.run(
                 ["systemctl", "is-enabled", _SERVICE_NAME],
@@ -204,11 +246,10 @@ def is_applied():
         except Exception:
             pass
 
-    applied = service_active and service_enabled and script_exists
+    applied = service_enabled and script_exists
 
     return {
         "applied": applied,
-        "service_active": service_active,
         "service_enabled": service_enabled,
         "script_exists": script_exists,
         "pci_device_exists": pci_device is not None,
@@ -235,7 +276,7 @@ def apply():
 
     # Write recovery script
     try:
-        os.makedirs(os.path.dirname(_SCRIPT_PATH), exist_ok=True)
+        os.makedirs(_STATE_DIR, mode=0o755, exist_ok=True)
         with open(_SCRIPT_PATH, "w") as f:
             f.write(_SCRIPT_CONTENT)
         os.chmod(_SCRIPT_PATH, 0o755)
@@ -259,16 +300,18 @@ def apply():
             ["systemctl", "daemon-reload"],
             capture_output=True, text=True, timeout=30, env=_clean_env()
         )
+        # enable, never `--now`: the unit is oneshot, so starting it here would
+        # rebind a perfectly healthy controller the moment the toggle is flipped.
         r = subprocess.run(
-            ["systemctl", "enable", "--now", _SERVICE_NAME],
+            ["systemctl", "enable", _SERVICE_NAME],
             capture_output=True, text=True, timeout=30, env=_clean_env()
         )
         if r.returncode == 0:
-            steps.append("Enabled and started service")
-            _log_info("Resume fix service started")
+            steps.append("Hooked the service onto the sleep targets")
+            _log_info("Resume fix service enabled")
         else:
-            _log_error(f"systemctl enable --now failed: {r.stderr.strip()}")
-            return {"success": False, "error": f"Failed to start service: {r.stderr.strip()}", "steps": steps}
+            _log_error(f"systemctl enable failed: {r.stderr.strip()}")
+            return {"success": False, "error": f"Failed to enable service: {r.stderr.strip()}", "steps": steps}
     except Exception as e:
         return {"success": False, "error": f"systemctl failed: {e}", "steps": steps}
 
@@ -285,7 +328,7 @@ def revert():
     if os.path.exists(_SERVICE_PATH):
         try:
             subprocess.run(
-                ["systemctl", "disable", "--now", _SERVICE_NAME],
+                ["systemctl", "disable", _SERVICE_NAME],
                 capture_output=True, text=True, timeout=30, env=_clean_env()
             )
             steps.append("Disabled resume recovery service")
@@ -307,6 +350,16 @@ def revert():
             steps.append("Removed recovery script")
         except Exception as e:
             _log_warning(f"Failed to remove script: {e}")
+
+    # Older builds wrote the script to /usr/local/sbin, which needed
+    # `steamos-readonly disable`. Clean it up if it is still lying around;
+    # failing is expected on a read-only root and is not an error.
+    if os.path.exists(_LEGACY_SCRIPT_PATH):
+        try:
+            os.remove(_LEGACY_SCRIPT_PATH)
+            steps.append(f"Removed legacy script at {_LEGACY_SCRIPT_PATH}")
+        except Exception as e:
+            _log_info(f"Left legacy script in place ({e})")
 
     # Reload systemd
     try:
