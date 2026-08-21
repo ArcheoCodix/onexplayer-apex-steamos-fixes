@@ -19,7 +19,6 @@ export interface OxpecStatus {
 
 export interface ResumeFixStatus {
   applied: boolean;
-  service_active?: boolean;
   service_enabled?: boolean;
   script_exists?: boolean;
   pci_device_exists?: boolean;

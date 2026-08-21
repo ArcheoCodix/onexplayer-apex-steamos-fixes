@@ -1,9 +1,11 @@
 """Resume recovery fix for OneXPlayer Apex.
 
-Installs a dbus-monitor daemon that listens for sleep/resume events and
-rebinds the xHCI USB controller to recover the gamepad after sleep.
+Installs a oneshot systemd unit ordered after the sleep targets, so systemd
+itself runs the recovery script once per resume. The script rebinds the xHCI
+USB controller when the internal chain did not come back on its own.
 
-Based on the xpad-fix3 package from the Korean OXP community.
+Originally based on the xpad-fix3 package from the Korean OXP community, which
+kept a dbus-monitor daemon running to catch the resume signal.
 
 The xHCI controller's PCI address depends on the Apex firmware version, so the
 generated script discovers it on every resume rather than having it baked in at
@@ -70,7 +72,9 @@ _SERVICE_PATH = f"/etc/systemd/system/{_SERVICE_NAME}"
 # Not an f-string: every brace below is literal shell.
 _SCRIPT_CONTENT = r"""#!/bin/bash
 # OneXPlayer Apex — Gamepad recovery after sleep
-# Listens for resume events via dbus and rebinds the xHCI controller.
+# Run once per resume by apex-resume-recover.service, which systemd orders
+# after the sleep targets. Rebinds the xHCI controller when the internal USB
+# chain did not come back.
 # Based on xpad-fix3 from the Korean OXP community.
 #
 # The controller's PCI address depends on the Apex firmware version, not on the
@@ -170,28 +174,23 @@ recover_gamepad() {
     fi
 }
 
-# Monitor dbus for resume events
-dbus-monitor --system "type='signal',interface='org.freedesktop.login1.Manager',member='PrepareForSleep'" | \
-while read -r line; do
-    if echo "$line" | grep -q "boolean false"; then
-        recover_gamepad &
-    fi
-done
+recover_gamepad
 """
+
+# systemd reaches suspend.target on the way *out* of sleep, so a oneshot unit
+# ordered after it runs once per resume with no daemon in between.
+_SLEEP_TARGETS = "suspend.target hibernate.target suspend-then-hibernate.target"
 
 _SERVICE_CONTENT = f"""[Unit]
 Description=OneXPlayer Apex gamepad resume recovery
-After=dbus.service
-Wants=dbus.service
+After={_SLEEP_TARGETS}
 
 [Service]
-Type=simple
+Type=oneshot
 ExecStart={_SCRIPT_PATH}
-Restart=always
-RestartSec=5
 
 [Install]
-WantedBy=multi-user.target
+WantedBy={_SLEEP_TARGETS}
 """
 
 
@@ -216,17 +215,10 @@ def is_applied():
     script_exists = os.path.exists(_SCRIPT_PATH)
     pci_device = _find_pci_device()
 
-    service_active = False
+    # No is-active check: the unit is Type=oneshot, so it reads as "inactive"
+    # at all times except the second or two it spends recovering.
     service_enabled = False
     if service_exists:
-        try:
-            r = subprocess.run(
-                ["systemctl", "is-active", _SERVICE_NAME],
-                capture_output=True, text=True, timeout=10, env=_clean_env()
-            )
-            service_active = r.stdout.strip() == "active"
-        except Exception:
-            pass
         try:
             r = subprocess.run(
                 ["systemctl", "is-enabled", _SERVICE_NAME],
@@ -236,11 +228,10 @@ def is_applied():
         except Exception:
             pass
 
-    applied = service_active and service_enabled and script_exists
+    applied = service_enabled and script_exists
 
     return {
         "applied": applied,
-        "service_active": service_active,
         "service_enabled": service_enabled,
         "script_exists": script_exists,
         "pci_device_exists": pci_device is not None,
@@ -291,16 +282,18 @@ def apply():
             ["systemctl", "daemon-reload"],
             capture_output=True, text=True, timeout=30, env=_clean_env()
         )
+        # enable, never `--now`: the unit is oneshot, so starting it here would
+        # rebind a perfectly healthy controller the moment the toggle is flipped.
         r = subprocess.run(
-            ["systemctl", "enable", "--now", _SERVICE_NAME],
+            ["systemctl", "enable", _SERVICE_NAME],
             capture_output=True, text=True, timeout=30, env=_clean_env()
         )
         if r.returncode == 0:
-            steps.append("Enabled and started service")
-            _log_info("Resume fix service started")
+            steps.append("Hooked the service onto the sleep targets")
+            _log_info("Resume fix service enabled")
         else:
-            _log_error(f"systemctl enable --now failed: {r.stderr.strip()}")
-            return {"success": False, "error": f"Failed to start service: {r.stderr.strip()}", "steps": steps}
+            _log_error(f"systemctl enable failed: {r.stderr.strip()}")
+            return {"success": False, "error": f"Failed to enable service: {r.stderr.strip()}", "steps": steps}
     except Exception as e:
         return {"success": False, "error": f"systemctl failed: {e}", "steps": steps}
 
@@ -317,7 +310,7 @@ def revert():
     if os.path.exists(_SERVICE_PATH):
         try:
             subprocess.run(
-                ["systemctl", "disable", "--now", _SERVICE_NAME],
+                ["systemctl", "disable", _SERVICE_NAME],
                 capture_output=True, text=True, timeout=30, env=_clean_env()
             )
             steps.append("Disabled resume recovery service")
