@@ -111,6 +111,9 @@ chain_healthy() {
 
 # How long to give the chain to come back after a bind
 SETTLE_TIMEOUT=10
+# How long to let the rest of the resume finish before touching the controller.
+# A margin, not a measured threshold — see the comment in recover_gamepad.
+RESUME_SETTLE=8
 
 # Sets SETTLED_AFTER to the number of quarter seconds spent waiting, so the
 # caller can report it either way.
@@ -159,7 +162,25 @@ recover_gamepad() {
         log "Internal USB chain is healthy — nothing to do"
         return
     fi
-    log "Internal chain is down — recovering gamepad"
+
+    # Rebinding this early into a resume is not safe. On an Apex the internal
+    # xHCI is function 4 of the same PCI device whose function 0 is the GPU, and
+    # a rebind issued 190ms after the resume — while that GPU was still
+    # unwinding a failed atomic commit — hung the machine hard. The same rebind
+    # of the same dead controller, minutes later, took 1s and worked.
+    #
+    # Nothing here is urgent: the gamepad is already gone and the session is not
+    # usable this early anyway, so wait for the rest of the resume to finish.
+    log "Internal chain is down — letting the resume settle for ${RESUME_SETTLE}s"
+    sleep "$RESUME_SETTLE"
+
+    # It sometimes comes back on its own once the resume has completed, in which
+    # case the safest recovery is no recovery.
+    if chain_healthy; then
+        log "Internal chain came back on its own — nothing to do"
+        return
+    fi
+    log "Internal chain is still down — recovering gamepad"
 
     xhci_pci=$(find_xhci)
     if [ -z "$xhci_pci" ]; then
