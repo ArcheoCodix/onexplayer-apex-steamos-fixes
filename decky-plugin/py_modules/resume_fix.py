@@ -98,6 +98,8 @@ HUB_BUS=usb1
 GAMEPAD_VID=045e
 GAMEPAD_PID=028e
 
+log() { logger -t apex-resume-recover "$1"; }
+
 find_usb() {
     local d
     for d in /sys/bus/usb/devices/*/; do
@@ -117,15 +119,26 @@ chain_healthy() {
 
 # How long to give the chain to come back after a bind
 SETTLE_TIMEOUT=10
+# How long to let the rest of the resume finish before touching the controller.
+# A margin, not a measured threshold — see the comment in recover_gamepad.
+RESUME_SETTLE=8
+
+# Sets SETTLED_AFTER to the number of quarter seconds spent waiting, so the
+# caller can report it either way.
+SETTLED_AFTER=0
 
 wait_for_chain() {
     # bash cannot compare floats, so count in quarter seconds
     local quarters=0 limit=$((SETTLE_TIMEOUT * 4))
     while ! chain_healthy; do
-        [ "$quarters" -ge "$limit" ] && return 1
+        if [ "$quarters" -ge "$limit" ]; then
+            SETTLED_AFTER=$quarters
+            return 1
+        fi
         sleep 0.25
         quarters=$((quarters + 1))
     done
+    SETTLED_AFTER=$quarters
     return 0
 }
 
@@ -154,29 +167,51 @@ recover_gamepad() {
     # Most resumes are fine. Rebinding one that worked tears down a healthy
     # controller for no reason, so look before touching anything.
     if chain_healthy; then
-        logger -t apex-resume-recover "Internal USB chain is healthy — nothing to do"
+        log "Internal USB chain is healthy — nothing to do"
         return
     fi
-    logger -t apex-resume-recover "Internal chain is down — recovering gamepad"
+
+    # Rebinding this early into a resume is not safe. On an Apex the internal
+    # xHCI is function 4 of the same PCI device whose function 0 is the GPU, and
+    # a rebind issued 190ms after the resume — while that GPU was still
+    # unwinding a failed atomic commit — hung the machine hard. The same rebind
+    # of the same dead controller, minutes later, took 1s and worked.
+    #
+    # Nothing here is urgent: the gamepad is already gone and the session is not
+    # usable this early anyway, so wait for the rest of the resume to finish.
+    log "Internal chain is down — letting the resume settle for ${RESUME_SETTLE}s"
+    sleep "$RESUME_SETTLE"
+
+    # It sometimes comes back on its own once the resume has completed, in which
+    # case the safest recovery is no recovery.
+    if chain_healthy; then
+        log "Internal chain came back on its own — nothing to do"
+        return
+    fi
+    log "Internal chain is still down — recovering gamepad"
 
     xhci_pci=$(find_xhci)
     if [ -z "$xhci_pci" ]; then
-        logger -t apex-resume-recover "No xHCI controller found — cannot recover"
+        log "No xHCI controller found — cannot recover"
         return
     fi
-    logger -t apex-resume-recover "Using xHCI controller $xhci_pci"
+    log "Using xHCI controller $xhci_pci"
     xhci_driver="/sys/bus/pci/devices/$xhci_pci/driver"
 
     if [ -e "$xhci_driver" ]; then
+        log "Unbinding $xhci_pci"
         echo "$xhci_pci" > "$xhci_driver/unbind" 2>/dev/null
+        log "Unbind returned"
         sleep 1
     fi
+    log "Binding $xhci_pci"
     echo "$xhci_pci" > /sys/bus/pci/drivers/xhci_hcd/bind 2>/dev/null
+    log "Bind returned"
 
     # The devices come back one by one over two to three seconds, and how long
     # exactly varies between resumes, so wait for them rather than guessing.
     if ! wait_for_chain; then
-        logger -t apex-resume-recover "Chain did not come back within ${SETTLE_TIMEOUT}s"
+        log "Chain did not come back within ${SETTLE_TIMEOUT}s"
         return
     fi
 
@@ -184,11 +219,11 @@ recover_gamepad() {
     # itself after they are re-enumerated, so the gamepad stays absent from
     # Steam until it is restarted. This is the SteamOS input daemon; upstream
     # deliberately keeps this script free of any daemon knowledge.
-    logger -t apex-resume-recover "Internal chain is back — restarting InputPlumber"
+    log "Internal chain is back after $((SETTLED_AFTER * 250))ms — restarting InputPlumber"
     if systemctl restart inputplumber.service 2>/dev/null; then
-        logger -t apex-resume-recover "Restarted inputplumber.service"
+        log "Restarted inputplumber.service"
     else
-        logger -t apex-resume-recover "Failed to restart inputplumber.service"
+        log "Failed to restart inputplumber.service"
     fi
 }
 
