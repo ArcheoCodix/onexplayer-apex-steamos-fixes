@@ -42,3 +42,6 @@ decky-plugin/py_modules/oxpec/build/.module-common.o
 # OS files
 .DS_Store
 Thumbs.db
+
+# Packaged plugin artifacts
+OneXPlayer_Apex_*.zip
