@@ -82,18 +82,32 @@ HUB_VID=1a86
 HUB_PID=8091
 # The bus that hub lives on, used only once the hub itself is gone
 HUB_BUS=usb1
+# The gamepad itself, the device a user actually notices going missing
+GAMEPAD_VID=045e
+GAMEPAD_PID=028e
+
+find_usb() {
+    local d
+    for d in /sys/bus/usb/devices/*/; do
+        [ "$(cat "$d/idVendor" 2>/dev/null)" = "$1" ] || continue
+        [ "$(cat "$d/idProduct" 2>/dev/null)" = "$2" ] || continue
+        printf '%s' "$d"
+        return 0
+    done
+    return 1
+}
+
+chain_healthy() {
+    find_usb "$HUB_VID" "$HUB_PID" >/dev/null || return 1
+    find_usb "$GAMEPAD_VID" "$GAMEPAD_PID" >/dev/null || return 1
+    return 0
+}
 
 find_xhci() {
-    local d hub=""
+    local d hub
 
     # 1. The hub is present: walk its sysfs path up to the controller
-    for d in /sys/bus/usb/devices/*/; do
-        [ "$(cat "$d/idVendor" 2>/dev/null)" = "$HUB_VID" ] || continue
-        [ "$(cat "$d/idProduct" 2>/dev/null)" = "$HUB_PID" ] || continue
-        hub="$d"
-        break
-    done
-    if [ -n "$hub" ]; then
+    if hub=$(find_usb "$HUB_VID" "$HUB_PID"); then
         readlink -f "$hub" | grep -oE '0000:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9]' | tail -1
         return
     fi
@@ -110,7 +124,14 @@ find_xhci() {
 
 recover_gamepad() {
     local xhci_pci xhci_driver
-    logger -t apex-resume-recover "Resume detected — recovering gamepad"
+
+    # Most resumes are fine. Rebinding one that worked tears down a healthy
+    # controller for no reason, so look before touching anything.
+    if chain_healthy; then
+        logger -t apex-resume-recover "Internal USB chain is healthy — nothing to do"
+        return
+    fi
+    logger -t apex-resume-recover "Internal chain is down — recovering gamepad"
 
     xhci_pci=$(find_xhci)
     if [ -z "$xhci_pci" ]; then
