@@ -85,6 +85,14 @@ INTERNAL_DEVICES = [
 # controller once the hub itself is gone and cannot point at its parent.
 _INTERNAL_BUS = "usb1"
 
+# How long to wait for the chain to come back after a bind, and how often to
+# look. Measured on an Apex: the host controller re-registers its buses, then
+# the hub appears ~1.2s after the bind and its ports enumerate in order, the
+# gamepad last at ~3.0s because it sits on the final port at full speed. A
+# fixed sleep short of that reports a failure the rebind had already fixed.
+_SETTLE_TIMEOUT = 10.0
+_SETTLE_INTERVAL = 0.25
+
 
 def _read(path):
     try:
@@ -163,9 +171,22 @@ def _rebind(pci_device):
         _log_error(f"Bind failed: {e}")
         return False
 
-    # Give the hub and its children time to re-enumerate
-    time.sleep(2)
     return True
+
+
+def _wait_for_chain(timeout=_SETTLE_TIMEOUT):
+    """Poll until the internal chain is healthy, or until timeout.
+
+    Returns (state, elapsed_seconds).
+    """
+    started = time.monotonic()
+    state = check_devices()
+    while not state["healthy"]:
+        if time.monotonic() - started >= timeout:
+            break
+        time.sleep(_SETTLE_INTERVAL)
+        state = check_devices()
+    return state, time.monotonic() - started
 
 
 def check_and_recover():
@@ -198,9 +219,9 @@ def check_and_recover():
         _log_info(f"xHCI recovery attempt {attempt}/2")
         _rebind(pci_device)
 
-        state = check_devices()
+        state, elapsed = _wait_for_chain()
         if state["healthy"]:
-            _log_info(f"xHCI recovery succeeded on attempt {attempt}")
+            _log_info(f"xHCI recovery succeeded on attempt {attempt} — chain back after {elapsed:.1f}s")
             return {
                 "needed": True,
                 "success": True,
@@ -210,8 +231,10 @@ def check_and_recover():
             }
 
         if attempt == 1:
-            _log_warning(f"Still missing: {', '.join(state['missing']) or 'the hub'} — retrying")
-            time.sleep(2)
+            _log_warning(
+                f"Still missing after {elapsed:.1f}s: "
+                f"{', '.join(state['missing']) or 'the hub'} — retrying"
+            )
 
     _log_error(f"xHCI recovery failed — still missing: {', '.join(state['missing']) or 'the hub'}")
     return {
