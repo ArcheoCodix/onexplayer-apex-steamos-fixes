@@ -84,6 +84,13 @@ jobs:
         working-directory: decky-plugin
         run: bun install
 
+      # build_info.ts is generated and gitignored, so it has to exist before
+      # tsc runs. `bun run package` would generate it, but only after the type
+      # check, which is the point of doing it first.
+      - name: Stamp the build id
+        working-directory: decky-plugin
+        run: bun run prebuild
+
       - name: Type check
         working-directory: decky-plugin
         run: bun run typecheck
