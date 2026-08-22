@@ -1,8 +1,9 @@
 """Resume recovery fix for OneXPlayer Apex.
 
 Installs a oneshot systemd unit ordered after the sleep targets, so systemd
-itself runs the recovery script once per resume. The script rebinds the xHCI
-USB controller when the internal chain did not come back on its own.
+itself runs the recovery script once per resume. The script waits for the resume
+to stop producing device events, then rebinds the xHCI USB controller if the
+internal chain still has not come back.
 
 Originally based on the xpad-fix3 package from the Korean OXP community, which
 kept a dbus-monitor daemon running to catch the resume signal.
@@ -78,19 +79,40 @@ _SCRIPT_CONTENT = r"""#!/bin/bash
 # Based on xpad-fix3 from the Korean OXP community.
 #
 # The controller's PCI address depends on the Apex firmware version, not on the
-# model, so it is resolved on every resume rather than hardcoded. That also
-# means the service keeps working across a firmware update.
+# model, so it is resolved on every resume rather than baked in at install time.
+
+set -u
 
 # The internal hub the gamepad, buttons and keyboard all hang off
 HUB_VID=1a86
 HUB_PID=8091
 # The bus that hub lives on, used only once the hub itself is gone
 HUB_BUS=usb1
-# The gamepad itself, the device a user actually notices going missing
 GAMEPAD_VID=045e
 GAMEPAD_PID=028e
+# The other two devices behind the hub. Not part of the health test — the
+# gamepad is the last to enumerate and the one a user notices — but logged, so
+# a device that keeps re-enumerating is visible instead of inferred afterwards.
+BUTTONS_VID=1a2c
+BUTTONS_PID=b001
+VENDORHID_VID=1a86
+VENDORHID_PID=fe00
 
-log() { logger -t apex-resume-recover "$1"; }
+# How long to give the chain to come back after a bind
+SETTLE_TIMEOUT=10
+# Never touch the controller sooner than this after a resume. A rebind 190ms
+# into a resume once hung the machine hard; the same rebind 8s in worked. The
+# floor is a margin over the known-bad point, not a measured threshold.
+QUIET_FLOOR=3
+# Act anyway past this, quiet or not, rather than never recovering
+QUIET_CEILING=10
+# Consecutive quiet polls required before acting
+QUIET_REQUIRED=2
+
+START=$(date +%s%N)
+
+elapsed_ms() { echo $(( ($(date +%s%N) - START) / 1000000 )); }
+log() { logger -t apex-resume-recover "[$(elapsed_ms)ms] $1"; }
 
 find_usb() {
     local d
@@ -103,17 +125,121 @@ find_usb() {
     return 1
 }
 
+# "1-1.1/7" or "-". The device number changes on every re-enumeration, so a
+# device that disappears and comes back is distinguishable from one that never
+# moved — which is exactly what could not be told apart from inside the script.
+device_state() {
+    local d
+    for d in /sys/bus/usb/devices/*/; do
+        [ "$(cat "$d/idVendor" 2>/dev/null)" = "$1" ] || continue
+        [ "$(cat "$d/idProduct" 2>/dev/null)" = "$2" ] || continue
+        printf '%s/%s' "$(basename "$d")" "$(cat "$d/devnum" 2>/dev/null || echo '?')"
+        return 0
+    done
+    printf '%s' '-'
+    return 1
+}
+
+snapshot() {
+    local s
+    s="hub=$(device_state "$HUB_VID" "$HUB_PID")"
+    s="$s buttons=$(device_state "$BUTTONS_VID" "$BUTTONS_PID")"
+    s="$s hid=$(device_state "$VENDORHID_VID" "$VENDORHID_PID")"
+    s="$s pad=$(device_state "$GAMEPAD_VID" "$GAMEPAD_PID")"
+    log "state[$1] $s"
+}
+
 chain_healthy() {
     find_usb "$HUB_VID" "$HUB_PID" >/dev/null || return 1
     find_usb "$GAMEPAD_VID" "$GAMEPAD_PID" >/dev/null || return 1
     return 0
 }
 
-# How long to give the chain to come back after a bind
-SETTLE_TIMEOUT=10
-# How long to let the rest of the resume finish before touching the controller.
-# A margin, not a measured threshold — see the comment in recover_gamepad.
-RESUME_SETTLE=8
+XHCI=""
+XHCI_HOW=""
+
+find_xhci() {
+    local d hub
+    XHCI=""; XHCI_HOW=""
+
+    # 1. The hub is present: walk its sysfs path up to the controller
+    if hub=$(find_usb "$HUB_VID" "$HUB_PID"); then
+        XHCI=$(readlink -f "$hub" | grep -oE '0000:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9]' | tail -1)
+        if [ -n "$XHCI" ]; then
+            XHCI_HOW="resolved from the internal hub"
+            return 0
+        fi
+    fi
+
+    # 2. The hub is gone: fall back to the controller still owning its bus. It
+    #    stays bound to the driver even when the host controller itself died.
+    for d in /sys/bus/pci/drivers/xhci_hcd/0000:*/; do
+        if [ -d "$d$HUB_BUS" ]; then
+            XHCI=$(basename "$d")
+            XHCI_HOW="owner of $HUB_BUS"
+            return 0
+        fi
+    done
+
+    XHCI_HOW="no xHCI controller could be identified"
+    return 1
+}
+
+# The kernel's own account of what just happened, so one
+# `journalctl -t apex-resume-recover` explains an occurrence without having to
+# cross-reference the kernel log by hand.
+kernel_verdict() {
+    dmesg 2>/dev/null | grep -E 'xhci_hcd 0000|usb 1-1: ' | tail -3 \
+        | while IFS= read -r line; do log "kernel: $line"; done
+}
+
+# The kernel's global uevent counter. A plain sysfs read that cannot go
+# missing, which is why the decision rests on it rather than on udevadm: gating
+# on a tool that may be absent would silently make every resume wait for the
+# ceiling instead of acting when things go quiet.
+seqnum() { cat /sys/kernel/uevent_seqnum 2>/dev/null || echo 0; }
+
+# Corroboration only, never a gate: udev can still be running rules after the
+# kernel has stopped emitting events, and it is worth seeing whether that lags
+# behind the counter.
+udev_state() {
+    command -v udevadm >/dev/null 2>&1 || { printf 'n/a'; return; }
+    if udevadm settle --timeout=0 >/dev/null 2>&1; then printf 'idle'; else printf 'busy'; fi
+}
+
+# Wait until the resume has stopped producing device events, rather than
+# sleeping a fixed amount and hoping. Returns 0 when it is time to act, 1 when
+# the chain came back on its own and there is nothing to do.
+wait_until_settled() {
+    local secs=0 quiet=0 last='' seq udev
+    while :; do
+        seq=$(seqnum)
+        udev=$(udev_state)
+        if [ "$seq" = "$last" ]; then
+            quiet=$((quiet + 1))
+        else
+            quiet=0
+        fi
+        last=$seq
+
+        snapshot "t+${secs}s seq=$seq udev=$udev quiet=$quiet"
+
+        if chain_healthy; then
+            log "Chain came back on its own after ${secs}s — touching nothing"
+            return 1
+        fi
+        if [ "$secs" -ge "$QUIET_FLOOR" ] && [ "$quiet" -ge "$QUIET_REQUIRED" ]; then
+            log "Device activity quiet for ${quiet}s — acting after ${secs}s"
+            return 0
+        fi
+        if [ "$secs" -ge "$QUIET_CEILING" ]; then
+            log "Still not quiet after ${secs}s — acting anyway"
+            return 0
+        fi
+        sleep 1
+        secs=$((secs + 1))
+    done
+}
 
 # Sets SETTLED_AFTER to the number of quarter seconds spent waiting, so the
 # caller can report it either way.
@@ -134,70 +260,37 @@ wait_for_chain() {
     return 0
 }
 
-find_xhci() {
-    local d hub
-
-    # 1. The hub is present: walk its sysfs path up to the controller
-    if hub=$(find_usb "$HUB_VID" "$HUB_PID"); then
-        readlink -f "$hub" | grep -oE '0000:[0-9a-f]{2}:[0-9a-f]{2}\.[0-9]' | tail -1
-        return
-    fi
-
-    # 2. The hub is gone: fall back to the controller owning its bus, which
-    #    stays bound when only the hub drops
-    for d in /sys/bus/pci/drivers/xhci_hcd/0000:*/; do
-        if [ -d "$d$HUB_BUS" ]; then
-            basename "$d"
-            return
-        fi
-    done
-}
-
 recover_gamepad() {
-    local xhci_pci xhci_driver
+    local driver_link drv rs
 
-    # Most resumes are fine. Rebinding one that worked tears down a healthy
-    # controller for no reason, so look before touching anything.
     if chain_healthy; then
+        snapshot healthy
         log "Internal USB chain is healthy — nothing to do"
         return
     fi
 
-    # Rebinding this early into a resume is not safe. On an Apex the internal
-    # xHCI is function 4 of the same PCI device whose function 0 is the GPU, and
-    # a rebind issued 190ms after the resume — while that GPU was still
-    # unwinding a failed atomic commit — hung the machine hard. The same rebind
-    # of the same dead controller, minutes later, took 1s and worked.
-    #
-    # Nothing here is urgent: the gamepad is already gone and the session is not
-    # usable this early anyway, so wait for the rest of the resume to finish.
-    log "Internal chain is down — letting the resume settle for ${RESUME_SETTLE}s"
-    sleep "$RESUME_SETTLE"
+    snapshot down
+    kernel_verdict
+    log "Internal chain is down — watching for the resume to settle"
+    wait_until_settled || return
 
-    # It sometimes comes back on its own once the resume has completed, in which
-    # case the safest recovery is no recovery.
-    if chain_healthy; then
-        log "Internal chain came back on its own — nothing to do"
+    if ! find_xhci; then
+        log "$XHCI_HOW — cannot recover"
         return
     fi
-    log "Internal chain is still down — recovering gamepad"
+    driver_link="/sys/bus/pci/devices/$XHCI/driver"
+    drv=absent; [ -e "$driver_link" ] && drv=bound
+    rs=$(cat "/sys/bus/pci/devices/$XHCI/power/runtime_status" 2>/dev/null || echo '?')
+    log "Using xHCI controller $XHCI ($XHCI_HOW) driver=$drv runtime=$rs"
 
-    xhci_pci=$(find_xhci)
-    if [ -z "$xhci_pci" ]; then
-        log "No xHCI controller found — cannot recover"
-        return
-    fi
-    log "Using xHCI controller $xhci_pci"
-    xhci_driver="/sys/bus/pci/devices/$xhci_pci/driver"
-
-    if [ -e "$xhci_driver" ]; then
-        log "Unbinding $xhci_pci"
-        echo "$xhci_pci" > "$xhci_driver/unbind" 2>/dev/null
+    if [ "$drv" = bound ]; then
+        log "Unbinding $XHCI"
+        echo "$XHCI" > "$driver_link/unbind" 2>/dev/null
         log "Unbind returned"
         sleep 1
     fi
-    log "Binding $xhci_pci"
-    echo "$xhci_pci" > /sys/bus/pci/drivers/xhci_hcd/bind 2>/dev/null
+    log "Binding $XHCI"
+    echo "$XHCI" > /sys/bus/pci/drivers/xhci_hcd/bind 2>/dev/null
     log "Bind returned"
 
     # The devices come back one by one over two to three seconds, and how long
@@ -207,6 +300,7 @@ recover_gamepad() {
     else
         log "Chain did not come back within ${SETTLE_TIMEOUT}s"
     fi
+    snapshot after
 }
 
 recover_gamepad
