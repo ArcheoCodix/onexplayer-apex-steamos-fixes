@@ -1,6 +1,6 @@
 {
   "name": "onexplayer-apex-steamos-tools",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Decky Loader plugin for OneXPlayer Apex fixes on SteamOS",
   "type": "module",
   "scripts": {
