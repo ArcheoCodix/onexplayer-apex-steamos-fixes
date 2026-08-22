@@ -83,6 +83,19 @@ Applies a parametric EQ to the internal speakers using PipeWire's built-in filte
 
 Requires [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader).
 
+### From a release
+
+Download the zip from the [latest release](../../releases/latest), then either install it
+through Decky — **Settings → Developer mode → Install Plugin from ZIP File** — or extract it
+by hand:
+
+```bash
+sudo unzip -o OneXPlayer_Apex_SteamOS_Tools-*.zip -d ~/homebrew/plugins/
+sudo systemctl restart plugin_loader.service
+```
+
+### From source
+
 ```bash
 cd decky-plugin
 bun install
@@ -91,7 +104,10 @@ sudo unzip -o OneXPlayer_Apex_SteamOS_Tools.zip -d ~/homebrew/plugins/
 sudo systemctl restart plugin_loader.service
 ```
 
-Or install the zip through Decky's **Developer mode → Install Plugin from ZIP File**.
+### After installing
+
+Every fix is a toggle, and nothing is switched on for you. The only thing that runs by itself
+is the gamepad check when the plugin loads.
 
 ## Notes
 

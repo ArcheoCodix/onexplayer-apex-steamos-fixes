@@ -79,8 +79,6 @@ that is not a SteamOS Apex the plugin logs why and takes no automatic action.
 
 ### Installation
 
-Download the zip below, extract it into `~/homebrew/plugins/`, then restart Decky:
-
-```
-sudo systemctl restart plugin_loader.service
-```
+Download the zip below, then follow the
+[installation instructions](https://github.com/ArcheoCodix/onexplayer-apex-steamos-fixes#installation)
+in the README.
