@@ -27,9 +27,45 @@ The Apex's internal gamepad, OXP buttons and internal keyboard all hang off a si
 - **Manual:** a *Recover Gamepad* button for when the controller goes silent mid-session
 
 ### Resume Recovery
-Installs a service that listens for resume events and rebinds the xHCI controller after sleep.
+Installs a `Type=oneshot` systemd unit ordered after the sleep targets, so systemd runs the
+recovery once per resume with no daemon in between. The script checks the chain first, waits for
+the resume to finish, rebinds only if needed, then restarts InputPlumber.
 
-> Whether this is needed on SteamOS is **not yet established** — the sleep/wake test has not been run. Treat it as opt-in.
+The failure it addresses is real and reproducible: the xHCI controller sometimes does not come
+back from s2idle, and the kernel drops the internal hub and everything behind it.
+
+```
+xhci_hcd 0000:c5:00.4: xHCI host controller not responding, assume dead
+xhci_hcd 0000:c5:00.4: HC died; cleaning up
+usb 1-1: PM: dpm_run_callback(): usb_dev_resume returns -22
+```
+
+Observed twice in 14 recorded resumes on firmware 2.17, on sleeps of 26 minutes and 15 seconds —
+duration is not the trigger. Both times the GPU had thrown a warning out of
+`amdgpu_dm_atomic_commit_tail` in the same resume; the internal xHCI is function 4 of the same
+PCI device whose function 0 is the GPU.
+
+> The trigger has fired correctly on a real failure, ~19 ms after the resume. The **recovery**
+> under a real failure has not yet completed successfully: the first attempt rebound too early
+> and hung the machine, which is why the script now waits before touching the controller. That
+> wait is a margin, not a measured threshold. Treat this one as opt-in until it has been through
+> a real `HC died` on this version.
+
+### Volume Buttons
+Makes the volume buttons work again. They emit `KEY_VOLUMEUP` / `KEY_VOLUMEDOWN` (scancodes
+`0xb0` / `0xae`) on the built-in AT keyboard, which InputPlumber lists as an Apex source device
+and grabs exclusively — while Steam replaces the profile's `target_devices` with `deck-uhid`
+alone, leaving no keyboard target able to re-emit them. The presses reach InputPlumber and stop
+there.
+
+The fix adds `passthrough: true` to that one source device, documented in InputPlumber's schema
+as *"events will be read from this device, but the source device will not be hidden or
+grabbed"*. It is how SteamOS already handles the AYANEO KUN and the MSI Claw.
+
+The override is written to `/etc/inputplumber/devices.d/` and **derived** from whatever config
+InputPlumber currently ships, with the source file's hash recorded in the generated header. The
+plugin rebuilds it on start if a SteamOS update has changed the original, so our copy cannot
+silently mask theirs.
 
 ### Speaker DSP (EQ Enhancement)
 Applies a parametric EQ to the internal speakers using PipeWire's built-in filter-chain. The Apex's speakers sound tinny and lack bass out of the box.

@@ -1,7 +1,7 @@
 """OneXPlayer Apex Tools — Decky Loader plugin backend.
 
-Exposes methods for gamepad recovery, resume recovery, and speaker DSP to
-the frontend via Decky's RPC bridge.
+Exposes methods for gamepad recovery, resume recovery, the volume buttons and
+speaker DSP to the frontend via Decky's RPC bridge.
 
 Each async method in the Plugin class becomes an RPC endpoint that
 the React frontend can call via @decky/api's `callable()`.
@@ -71,6 +71,22 @@ except Exception as e:
     apply_resume_fix_impl = None
     revert_resume_fix_impl = None
     resume_fix_status = None
+
+try:
+    import volume_buttons as _volume_buttons_mod
+    from volume_buttons import (
+        apply as apply_volume_buttons_impl,
+        revert as revert_volume_buttons_impl,
+        is_applied as volume_buttons_status,
+        refresh_if_stale as refresh_volume_buttons_impl,
+    )
+except Exception as e:
+    decky.logger.error(f"Failed to import volume_buttons: {e}")
+    _volume_buttons_mod = None
+    apply_volume_buttons_impl = None
+    revert_volume_buttons_impl = None
+    volume_buttons_status = None
+    refresh_volume_buttons_impl = None
 
 try:
     import xhci_recovery as _xhci_recovery_mod
@@ -195,6 +211,8 @@ if _speaker_dsp_mod:
     _speaker_dsp_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
 if _resume_fix_mod:
     _resume_fix_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
+if _volume_buttons_mod:
+    _volume_buttons_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
 if _xhci_recovery_mod:
     _xhci_recovery_mod.set_log_callbacks(_log_info, _log_error, _log_warning)
 
@@ -254,6 +272,16 @@ class Plugin:
             return
         _log_info(f"Platform OK: {platform['os_id']} on {platform['product']}")
 
+        # Rebuild the InputPlumber override if SteamOS has shipped a new Apex
+        # config since it was installed, so our copy cannot mask theirs.
+        if refresh_volume_buttons_impl:
+            try:
+                refreshed = await asyncio.to_thread(refresh_volume_buttons_impl)
+                if refreshed.get("refreshed"):
+                    _log_info("Rebuilt the volume button override against the new InputPlumber config")
+            except Exception as e:
+                _log_error(f"Volume button override refresh failed: {e}")
+
         # Recover the xHCI controller if the internal gamepad USB devices are
         # missing (the internal hub sometimes drops during boot on the Apex)
         if xhci_check_and_recover:
@@ -285,6 +313,7 @@ class Plugin:
             "platform": check_platform(),
             "speaker_dsp": speaker_dsp_status() if speaker_dsp_status else {"enabled": False, "profile": None, "speaker_node": None},
             "resume_fix": resume_fix_status() if resume_fix_status else {"applied": False, "error": "module not loaded"},
+            "volume_buttons": volume_buttons_status() if volume_buttons_status else {"applied": False, "error": "module not loaded"},
         }
 
     # -- Logs --
@@ -481,6 +510,43 @@ class Plugin:
             return result
         except Exception as e:
             _log_error(f"Resume fix revert exception: {e}")
+            return {"success": False, "error": str(e)}
+
+    # -- Volume Buttons --
+
+    async def get_volume_buttons_status(self):
+        if not volume_buttons_status:
+            return {"applied": False, "error": "module not loaded"}
+        return volume_buttons_status()
+
+    async def apply_volume_buttons(self):
+        if not apply_volume_buttons_impl:
+            return {"success": False, "error": "volume_buttons module not loaded"}
+        _log_info("Enabling the volume buttons...")
+        try:
+            result = await asyncio.to_thread(apply_volume_buttons_impl)
+            if result.get("success"):
+                _log_info(f"Volume buttons applied: {result.get('message', 'OK')}")
+            else:
+                _log_error(f"Volume buttons failed: {result.get('error', 'unknown')}")
+            return result
+        except Exception as e:
+            _log_error(f"Volume buttons exception: {e}")
+            return {"success": False, "error": str(e)}
+
+    async def revert_volume_buttons(self):
+        if not revert_volume_buttons_impl:
+            return {"success": False, "error": "volume_buttons module not loaded"}
+        _log_info("Reverting the volume buttons fix...")
+        try:
+            result = await asyncio.to_thread(revert_volume_buttons_impl)
+            if result.get("success"):
+                _log_info(f"Volume buttons reverted: {result.get('message', 'OK')}")
+            else:
+                _log_error(f"Volume buttons revert failed: {result.get('error', 'unknown')}")
+            return result
+        except Exception as e:
+            _log_error(f"Volume buttons revert exception: {e}")
             return {"success": False, "error": str(e)}
 
     # -- xHCI Recovery (manual trigger) --

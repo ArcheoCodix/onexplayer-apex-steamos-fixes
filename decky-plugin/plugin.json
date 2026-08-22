@@ -5,7 +5,7 @@
   "api_version": 1,
   "publish": {
     "tags": ["hardware", "handheld", "onexplayer", "steamos"],
-    "description": "Fixes for the OneXPlayer Apex on SteamOS: internal gamepad recovery and a parametric EQ for the internal speakers.",
+    "description": "Fixes for the OneXPlayer Apex on SteamOS: volume buttons, internal gamepad recovery after resume, and a parametric EQ for the internal speakers.",
     "image": ""
   }
 }

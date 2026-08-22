@@ -13,6 +13,15 @@ export interface ResumeFixStatus {
   error?: string;
 }
 
+export interface VolumeButtonsStatus {
+  applied: boolean;
+  override_path?: string;
+  shipped_exists?: boolean;
+  stale?: boolean;
+  ours?: boolean;
+  error?: string;
+}
+
 export interface PlatformStatus {
   supported: boolean;
   reason?: string | null;
@@ -24,6 +33,7 @@ export interface StatusResponse {
   platform: PlatformStatus;
   speaker_dsp: SpeakerDSPStatus;
   resume_fix: ResumeFixStatus;
+  volume_buttons: VolumeButtonsStatus;
 }
 
 export interface FixResult {

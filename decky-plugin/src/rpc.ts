@@ -23,5 +23,9 @@ export const isBypassedSpeakerDSP = callable<[], { bypassed: boolean; error?: st
 export const applyResumeFix = callable<[], FixResult>("apply_resume_fix");
 export const revertResumeFix = callable<[], FixResult>("revert_resume_fix");
 
+// Volume buttons (InputPlumber swallows them without an override)
+export const applyVolumeButtons = callable<[], FixResult>("apply_volume_buttons");
+export const revertVolumeButtons = callable<[], FixResult>("revert_volume_buttons");
+
 // xHCI recovery (manual gamepad recovery)
 export const recoverGamepad = callable<[], FixResult>("recover_gamepad");

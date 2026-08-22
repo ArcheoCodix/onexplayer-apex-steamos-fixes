@@ -6,20 +6,44 @@ import {
   Spinner,
   ToggleField,
 } from "@decky/ui";
-import type { LoadingState, ResultMessage, ResumeFixStatus } from "./types";
-import { applyResumeFix, revertResumeFix, recoverGamepad } from "./rpc";
+import type {
+  LoadingState,
+  ResultMessage,
+  ResumeFixStatus,
+  VolumeButtonsStatus,
+} from "./types";
+import {
+  applyResumeFix,
+  revertResumeFix,
+  recoverGamepad,
+  applyVolumeButtons,
+  revertVolumeButtons,
+} from "./rpc";
 import { InlineStatus } from "./InlineStatus";
 
 export const FixesSection: FC<{
   resumeFix: ResumeFixStatus;
   setResumeFix: React.Dispatch<React.SetStateAction<ResumeFixStatus>>;
+  volumeButtons: VolumeButtonsStatus;
+  setVolumeButtons: React.Dispatch<React.SetStateAction<VolumeButtonsStatus>>;
   loading: LoadingState;
   setLoading: (l: LoadingState) => void;
   showResult: (key: string, text: string, type: "success" | "error") => void;
   result: ResultMessage | null;
   statusLoaded: boolean;
   refresh: () => Promise<void>;
-}> = ({ resumeFix, setResumeFix, loading, setLoading, showResult, result, statusLoaded, refresh }) => {
+}> = ({
+  resumeFix,
+  setResumeFix,
+  volumeButtons,
+  setVolumeButtons,
+  loading,
+  setLoading,
+  showResult,
+  result,
+  statusLoaded,
+  refresh,
+}) => {
   const handleResumeFix = async (enabled: boolean) => {
     setLoading({
       active: "resume",
@@ -35,6 +59,27 @@ export const FixesSection: FC<{
       }
     } catch (e) {
       showResult("resume", `Error: ${e}`, "error");
+    } finally {
+      setLoading({ active: null, message: "" });
+      refresh();
+    }
+  };
+
+  const handleVolumeButtons = async (enabled: boolean) => {
+    setLoading({
+      active: "volume",
+      message: enabled ? "Enabling volume buttons..." : "Reverting volume buttons...",
+    });
+    try {
+      const res = enabled ? await applyVolumeButtons() : await revertVolumeButtons();
+      if (res.success) {
+        setVolumeButtons((prev) => ({ ...prev, applied: enabled }));
+        showResult("volume", res.message || (enabled ? "Enabled" : "Reverted"), "success");
+      } else {
+        showResult("volume", res.error || "Failed", "error");
+      }
+    } catch (e) {
+      showResult("volume", `Error: ${e}`, "error");
     } finally {
       setLoading({ active: null, message: "" });
       refresh();
@@ -84,6 +129,22 @@ export const FixesSection: FC<{
             />
           </PanelSectionRow>
           <InlineStatus loading={loading} result={result} section="resume" />
+
+          {/* Volume Buttons */}
+          <PanelSectionRow>
+            <ToggleField
+              label="Volume Buttons"
+              description={
+                volumeButtons.applied
+                  ? "Active — InputPlumber no longer swallows the volume keys"
+                  : "Fix the volume buttons doing nothing"
+              }
+              checked={volumeButtons.applied}
+              disabled={loading.active === "volume"}
+              onChange={handleVolumeButtons}
+            />
+          </PanelSectionRow>
+          <InlineStatus loading={loading} result={result} section="volume" />
 
           {/* Manual Gamepad Recovery */}
           <PanelSectionRow>

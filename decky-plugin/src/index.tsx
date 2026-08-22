@@ -2,7 +2,14 @@ import { useState, useEffect, useCallback, FC } from "react";
 import { PanelSection, PanelSectionRow, staticClasses } from "@decky/ui";
 import { definePlugin } from "@decky/api";
 import { BUILD_ID } from "./build_info";
-import type { SpeakerDSPStatus, ResumeFixStatus, PlatformStatus, LoadingState, ResultMessage } from "./types";
+import type {
+  SpeakerDSPStatus,
+  ResumeFixStatus,
+  VolumeButtonsStatus,
+  PlatformStatus,
+  LoadingState,
+  ResultMessage,
+} from "./types";
 import { getStatus } from "./rpc";
 import { SpeakerDSPSection } from "./SpeakerDSPSection";
 import { FixesSection } from "./FixesSection";
@@ -12,6 +19,7 @@ const Content: FC = () => {
   const [platform, setPlatform] = useState<PlatformStatus>({ supported: true });
   const [speakerDSP, setSpeakerDSP] = useState<SpeakerDSPStatus>({ enabled: false });
   const [resumeFix, setResumeFix] = useState<ResumeFixStatus>({ applied: false });
+  const [volumeButtons, setVolumeButtons] = useState<VolumeButtonsStatus>({ applied: false });
   const [statusLoaded, setStatusLoaded] = useState(false);
   const [loading, setLoading] = useState<LoadingState>({ active: null, message: "" });
   const [result, setResult] = useState<ResultMessage | null>(null);
@@ -27,6 +35,7 @@ const Content: FC = () => {
       setPlatform(status.platform);
       setSpeakerDSP(status.speaker_dsp);
       setResumeFix(status.resume_fix);
+      setVolumeButtons(status.volume_buttons);
     } catch (e) {
       console.error("Failed to get status:", e);
     } finally {
@@ -73,6 +82,8 @@ const Content: FC = () => {
       <FixesSection
         resumeFix={resumeFix}
         setResumeFix={setResumeFix}
+        volumeButtons={volumeButtons}
+        setVolumeButtons={setVolumeButtons}
         loading={loading}
         setLoading={setLoading}
         showResult={showResult}
