@@ -1,181 +1,141 @@
-# OneXPlayer Apex — Bazzite Fixes
+# OneXPlayer Apex — SteamOS Fixes
 
-A [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) plugin for the **OneXPlayer Apex** (AMD Ryzen AI Max+ 395 "Strix Halo") running **Bazzite**. Provides hardware fixes, sleep enablement, and speaker EQ — all accessible from the SteamOS Quick Access Menu.
+A [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) plugin for the **OneXPlayer Apex** (AMD Ryzen AI Max+ 395 "Strix Halo") running **SteamOS**.
 
-> **This is not a general-purpose tool.** It is specifically for the OneXPlayer Apex on Bazzite. It patches device-specific HID mappings, EC registers, and PipeWire configs that are unique to this hardware.
+> **On Bazzite, use the [upstream plugin](https://github.com/srsholmes/onexplayer-apex-bazzite-fixes) instead.** This is a SteamOS-only fork: it removes the HHD-era fixes, which SteamOS does not need and which would conflict with its kernel drivers. The plugin refuses to run automatically on anything that is not SteamOS on an Apex.
 
-## Screenshots
+## What SteamOS already handles
 
-| Fixes & Speaker DSP | EQ Sliders |
-|:---:|:---:|
-| ![Fixes and Speaker DSP](screenshots/fixes-and-speaker-dsp.png) | ![EQ Sliders](screenshots/eq-sliders.png) |
+Most of what the upstream plugin fixes on Bazzite is shipped in-tree by SteamOS (verified on kernel `6.18.42-valve2-neptune` with InputPlumber 0.78.0). **You do not need a plugin for any of this:**
+
+| Feature | Provided by |
+|---|---|
+| EC sensors, fan RPM & PWM | `oxpec` in-tree, autoloads via DMI modalias → `hwmon` `oxp_ec` |
+| Face buttons, Turbo, KB, Orange button | `hid-oxp` + `/usr/share/inputplumber/capability_maps/onexplayer_type8.yaml` |
+| Back paddles (L4/R4) | same — reported as `Left`/`RightPaddle1`, mapped to the virtual controller |
+| Joystick ring RGB | `hid-oxp` → `/sys/class/leds/oxp:rgb:joystick_rings` |
+| Light sleep (s2idle) | `amd_iommu=off` already in the cmdline, `mem_sleep` defaults to `s2idle` |
+
+Do **not** install the upstream plugin's back paddle fix on SteamOS: it writes a persistent `0xB4` firmware remap that `hid-oxp` does not expect.
 
 ## Features
 
-### EC Sensor Driver (oxpec)
-Loads the `oxpec` kernel module which provides hwmon sensor access and enables [HHD](https://github.com/hhd-dev/hhd)'s native fan curves. With this driver loaded, fan control is handled natively by HHD and PowerControl — no custom fan curve code needed.
+### Gamepad Recovery
+The Apex's internal gamepad, OXP buttons and internal keyboard all hang off a single internal USB hub (`1a86:8091`) behind one xHCI controller. That hub sometimes drops a few seconds after boot, taking all three with it. InputPlumber has usually already published its virtual controller by then, so Steam shows a gamepad that answers nothing.
 
-- Toggle on to install the module and a systemd service that loads it on boot
-- Bundled `.ko` files for kernels `6.17.7-ba25` and `6.17.7-ba28` — auto-selects the right one at boot
-
-### Button Fix
-Patches [HHD](https://github.com/hhd-dev/hhd) to recognize the Apex as a known device. Without this, HHD grabs input but doesn't forward button events — face buttons, Home, and QAM buttons are all dead.
-
-- Toggle on to apply the fix, toggle off to restore original HHD files
-- Also enables back paddle support (see below) — the patched HHD files include M1/M2 → extra_l1/extra_r1 mapping
-- Survives sleep/wake but must be re-applied after Bazzite updates or `rpm-ostree` operations
-
-### Back Paddle Support
-Enables the L4/R4 back paddles by writing a firmware-level key remap to the controller and routing paddle events through HHD's virtual gamepad. No intercept mode — the standard Xbox controller stays fully active with rumble/vibration support.
-
-**How it works:**
-1. A one-shot setup writes a B4 remap command to the controller firmware, reassigning M1 → F14 and M2 → F13 (persists across reboots)
-2. A B2 enable/disable cycle activates "report mode" so the controller emits paddle events (must be re-activated each boot)
-3. The patched HHD reads these events and maps them to `extra_r1` (R4) and `extra_l1` (L4) on its virtual gamepad
-
-- Back paddles appear as L4/R4 in Steam Input settings (per-game or global)
-- No phantom input device — paddles go through HHD's existing virtual gamepad
-- Full rumble support (not possible with the old intercept mode approach)
-- Requires the Button Fix to be applied (patched HHD files include the paddle mapping)
-
-### Speaker DSP (EQ Enhancement)
-Applies a parametric EQ to the internal speakers using PipeWire's built-in filter-chain. The Apex's speakers sound tinny and lack bass out of the box — this makes them significantly better.
-
-- **3 built-in presets**: Balanced, Bass Boost, Treble — tuned and tested at 100% volume without clipping
-- **Custom profiles**: copy a preset and tweak the 7-band EQ (64 Hz to 16 kHz, +/-15 dB per band)
-- **Original Sound toggle**: instantly A/B compare your EQ against the raw speaker output
-- **Test Sound**: plays a bundled music track ([NCS](https://ncs.io/) licensed) for quick EQ previewing
-- Only affects internal speakers — headphones and external audio pass through unmodified
+- **Automatic:** checked on every plugin load, rebinds the xHCI controller if the internal devices are missing
+- **Manual:** a *Recover Gamepad* button for when the controller goes silent mid-session
 
 ### Resume Recovery
-Installs a background service that recovers the gamepad after sleep by rebinding the xHCI USB controller. Without this, the Xbox controller disappears after wake and requires a reboot.
+Installs a `Type=oneshot` systemd unit ordered after the sleep targets, so systemd runs the
+recovery once per resume with no daemon in between. The script checks the chain first, waits for
+the resume to finish, rebinds only if needed, then restarts InputPlumber.
 
-- Listens for D-Bus resume events and rebinds PCI device `0000:65:00.4`
-- Two-phase recovery: fast (1s) then fallback (2s)
-
-### Light Sleep
-Applies kernel parameters for s2idle light sleep. **Requires "ACPI Auto configuration" enabled in BIOS.**
-
-- Applies `mem_sleep_default=s2idle` and `amd_iommu=off`
-- Automatically removes known-problematic legacy kargs from previous fix attempts
-- Requires reboot after applying (button fix must be re-applied after reboot)
-
-> **Note:** S0i3 deep sleep is still broken on Strix Halo with kernel 6.17 (requires ACPI C4 in kernel 6.18+). This is *light sleep* (s2idle) which provides lower power draw than staying awake but not as deep as S0i3.
-
-#### Required kargs
+The failure it addresses is real and reproducible: the xHCI controller sometimes does not come
+back from s2idle, and the kernel drops the internal hub and everything behind it.
 
 ```
-mem_sleep_default=s2idle
-amd_iommu=off
+xhci_hcd 0000:c5:00.4: xHCI host controller not responding, assume dead
+xhci_hcd 0000:c5:00.4: HC died; cleaning up
+usb 1-1: PM: dpm_run_callback(): usb_dev_resume returns -22
 ```
 
-`amd_iommu=off` is required for s2idle to work on this hardware — while it blocks the S0i3 path, s2idle will not enter correctly without it on Strix Halo.
+Observed twice in 14 recorded resumes on firmware 2.17, on sleeps of 26 minutes and 15 seconds —
+duration is not the trigger. Both times the GPU had thrown a warning out of
+`amdgpu_dm_atomic_commit_tail` in the same resume; the internal xHCI is function 4 of the same
+PCI device whose function 0 is the GPU.
 
-#### Known problematic kargs (auto-removed)
+> The trigger has fired correctly on a real failure, ~19 ms after the resume. The **recovery**
+> under a real failure has not yet completed successfully: the first attempt rebound too early
+> and hung the machine, which is why the script now waits before touching the controller. That
+> wait is a margin, not a measured threshold. Treat this one as opt-in until it has been through
+> a real `HC died` on this version.
 
-| Karg | Issue |
-|------|-------|
-| `amd_iommu=on` | Invalid AMD parameter, silently ignored |
-| `acpi.ec_no_wakeup=1` | Prevents EC-based wakeup |
-| `amdgpu.cwsr_enable=0` | Compute-specific, not needed |
-| `amdgpu.gttsize=126976` | Not sleep-related |
-| `ttm.pages_limit=32505856` | Not sleep-related |
+### Volume Buttons
+Makes the volume buttons work again. They emit `KEY_VOLUMEUP` / `KEY_VOLUMEDOWN` (scancodes
+`0xb0` / `0xae`) on the built-in AT keyboard, which InputPlumber lists as an Apex source device
+and grabs exclusively — while Steam replaces the profile's `target_devices` with `deck-uhid`
+alone, leaving no keyboard target able to re-emit them. The presses reach InputPlumber and stop
+there.
 
-### Sleep Fix (Fan Noise)
-Neutralizes the `fw-fanctrl-suspend` script — a Framework Laptop tool shipped with Bazzite that errors on non-Framework hardware, keeping fans running during sleep. Also installs a udev rule to prevent the fingerprint reader from immediately waking the device.
+The fix adds `passthrough: true` to that one source device, documented in InputPlumber's schema
+as *"events will be read from this device, but the source device will not be hidden or
+grabbed"*. It is how SteamOS already handles the AYANEO KUN and the MSI Claw.
 
-### Home Button
-Monitors the Apex's hidraw device for the Home/Orange button press (sends a non-standard `LCtrl+LAlt+LGUI` combo) and launches HHD's overlay UI.
+The override is written to `/etc/inputplumber/devices.d/` and **derived** from whatever config
+InputPlumber currently ships, with the source file's hash recorded in the generated header. The
+plugin rebuilds it on start if a SteamOS update has changed the original, so our copy cannot
+silently mask theirs.
+
+### Speaker DSP (EQ Enhancement)
+Applies a parametric EQ to the internal speakers using PipeWire's built-in filter-chain. The Apex's speakers sound tinny and lack bass out of the box.
+
+- **3 built-in presets**: Balanced, Bass Boost, Treble — tuned at 100% volume without clipping
+- **Custom profiles**: copy a preset and tweak the 7-band EQ (64 Hz to 16 kHz, +/-15 dB per band)
+- **Original Sound toggle**: A/B your EQ against the raw output
+- **Test Sound**: plays a bundled track ([NCS](https://ncs.io/) licensed)
+
+> **Known limitation on SteamOS.** SteamOS exposes a single `analog-stereo` sink for the card — there is no dedicated speaker sink as on Bazzite's UCM profile. The EQ therefore applies to headphones as well. A port-aware version is the next planned change.
+
+![EQ Sliders](screenshots/eq-sliders.png)
 
 ## Installation
 
-Make sure [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader) is installed on your Bazzite system.
+Requires [Decky Loader](https://github.com/SteamDeckHomebrew/decky-loader).
 
-### Option A: Install via Decky Developer Mode (Recommended)
+### From a release
 
-1. Download `OneXPlayer_Apex_Tools.zip` from the [Releases](https://github.com/srsholmes/onexplayer-apex-bazzite-fixes/releases) page
-2. Enable Developer mode in Decky Loader:
-   - Open the QAM sidebar (press the `...` button)
-   - Go to the Decky tab (plug icon)
-   - Open the settings gear icon (top right)
-   - Toggle **Developer mode** on
-3. Install the plugin:
-   - In the Decky settings page, a new **Developer** section will appear
-   - Click **Install Plugin from ZIP File**
-   - Navigate to `OneXPlayer_Apex_Tools.zip` and select it
-
-### Option B: Install via Terminal
+Download the zip from the [latest release](../../releases/latest), then either install it
+through Decky — **Settings → Developer mode → Install Plugin from ZIP File** — or extract it
+by hand:
 
 ```bash
-sudo unzip OneXPlayer_Apex_Tools.zip -d ~/homebrew/plugins/
+sudo unzip -o OneXPlayer_Apex_SteamOS_Tools-*.zip -d ~/homebrew/plugins/
 sudo systemctl restart plugin_loader.service
 ```
 
-### Option C: Build from Source
+### From source
 
 ```bash
-curl -fsSL https://bun.sh/install | bash  # install bun if needed
 cd decky-plugin
 bun install
-bun run build
 bun run package
-# Then install the zip via Option A or B
+sudo unzip -o OneXPlayer_Apex_SteamOS_Tools.zip -d ~/homebrew/plugins/
+sudo systemctl restart plugin_loader.service
 ```
 
-## Bazzite Updates & Kernel Compatibility
+### After installing
 
-Bazzite ships periodic kernel updates (e.g. `ba25` → `ba28`). When the kernel changes, the bundled `oxpec.ko` must match the running kernel or it will fail to load with "Invalid module format".
+Every fix is a toggle, and nothing is switched on for you. The only thing that runs by itself
+is the gamepad check when the plugin loads.
 
-**What happens on a kernel update:**
-- The oxpec driver will fail to load until a matching `.ko` is bundled in the plugin
-- Button fix and sleep fix patches in `/usr/lib/` get overwritten — re-apply after updates
-- The `ostree admin unlock --hotfix` overlay is lost on reboot/update
+## Notes
 
-**Current mitigations:**
-- The plugin auto-loads oxpec on every boot via `ensure_loaded()`, with a fallback chain that handles SELinux and kernel mismatches gracefully
-- Multiple kernel `.ko` files are bundled so minor updates don't break things
-- Working on making the update process smoother so new kernels can be supported quickly
+- **Requires root.** The plugin runs with the `root` flag.
+- **Writable paths.** On SteamOS `/` (and so `/usr`) is read-only and replaced on update, while `/etc` is an overlay backed by `/var` and `/var` is a separate filesystem — both writable without `steamos-readonly disable`. Persistent state belongs in `/var`, units in `/etc/systemd/system`.
+- **Platform guard.** The plugin checks `ID=steamos` in `/etc/os-release` and the DMI product name. On a mismatch it logs and performs no automatic action.
 
-**Once Bazzite's upstream kernel includes the Apex DMI entry in `oxpec`, none of this will be needed** — a simple `modprobe oxpec` will just work and the bundled `.ko` becomes unnecessary.
+## Relationship to upstream
 
-## Important Notes
+Forked from [srsholmes/onexplayer-apex-bazzite-fixes](https://github.com/srsholmes/onexplayer-apex-bazzite-fixes). The HHD-era modules (button fix, back paddles, home button, oxpec loader, sleep kargs, fan control) were removed rather than made conditional — every module that would have needed a platform switch is one SteamOS does not need.
 
-- **Secure Boot must be disabled.** The bundled `oxpec.ko` is unsigned. If Secure Boot is enabled, the kernel will refuse to load it. Disable Secure Boot in BIOS before using the oxpec driver.
-- **Temporary fixes.** The button fix and sleep fix patch files in `/usr/lib/` which get overwritten on Bazzite updates. Re-apply after updates.
-- **Immutable filesystem.** Uses `ostree admin unlock --hotfix` to make `/usr/lib` writable. This unlock is lost on reboot/update.
-- **Requires root.** The Decky plugin runs with the `root` flag.
-- **Fan control.** With the oxpec driver loaded, fan curves are handled natively by HHD / PowerControl. No custom fan control is included in this plugin.
-
-## Acknowledgments
-
-The `oxpec` kernel module, `xpad-fix3` resume recovery script, and `fw-fanctrl-suspend` sleep fix are based on fix packages shared by **스트로바쿠다스 (drama8448)** from the Korean OneXPlayer community on DCInside UMPC Gallery:
-
-- [Apex Bazzite Fan Control Patch Update](https://gall.dcinside.com/mgallery/board/view/?id=umpc&no=141816) — Original post with oxpec.ko, hhd-autolink, xpad-fix3, and fw-fanctrl-suspend fixes
-
-The HHD button fix patches are built against [HHD v4.1.5](https://github.com/hhd-dev/hhd) by [antheas](https://github.com/antheas).
-
-## When Will This Be Unnecessary?
-
-These fixes become obsolete when:
-
-- **HHD** adds Apex to its device list upstream ([hhd-dev/hhd](https://github.com/hhd-dev/hhd))
-- **Bazzite's kernel** includes the `oxpec` driver for Strix Halo EC sensor access
-- **Kernel 6.18+** ships with ACPI C4 support for S0i3 deep sleep on Strix Halo
+Fixes that are not SteamOS-specific are contributed back upstream on their own branches rather than carried here. The first is the hardcoded xHCI PCI address (`0000:65:00.4`): that address depends on the Apex's **firmware version**, not the distribution — SteamOS's own InputPlumber profile documents both `65:00.4` (original firmware) and `c5:00.4` (updated firmware) — so Bazzite users on recent firmware hit the same silent failure.
 
 ## Hardware Reference
 
 | Component | Detail |
-|-----------|--------|
+|---|---|
 | **APU** | AMD Ryzen AI Max+ 395 (16C/32T Zen 5, RDNA 3.5 40 CUs) |
-| **RAM** | 48 GB unified (shared CPU+GPU) |
 | **Display** | 8" 1920x1200, 120 Hz VRR |
-| **Cooling** | Dual-fan, 5400 RPM max |
-| **Keyboard HID** | USB VID `1a86`, PID `FE00` |
-| **EC PWM range** | 0-184 native (scaled to 0-255 for sysfs) |
+| **Internal USB hub** | `1a86:8091` (QinHeng) |
+| **Internal gamepad** | `045e:028e` (Xbox 360 pad, `xpad`) |
+| **OXP buttons / RGB** | `1a2c:b001` (`hid-oxp`) |
+| **Vendor HID / keyboard** | `1a86:fe00` (`hid-oxp`) |
+| **Audio card** | `alsa_card.pci-0000_c5_00.6` |
 
-## Disclaimer
+## Acknowledgments
 
-This software is provided "as is", without warranty of any kind. Use at your own risk. These fixes modify system files, kernel parameters, and interact directly with hardware registers.
+Upstream plugin and the original fix work by [srsholmes](https://github.com/srsholmes), built on fix packages shared by **스트로바쿠다스 (drama8448)** from the Korean OneXPlayer community on DCInside UMPC Gallery. The `oxpec` driver is by Joaquín Ignacio Aramendía and Antheas Kapenekakis, now in-tree.
 
 ## License
 

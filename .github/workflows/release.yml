@@ -1,23 +1,80 @@
-# Disabled while testing — re-enable when ready for releases
-# name: Build and Release
+# Publishes a GitHub release whenever a v* tag is pushed.
 #
-# on:
-#   push:
-#     branches: [main]
-
-name: Build and Release (disabled)
+# package.json's `version` is the single source of truth: it is what Decky shows
+# in the plugin list, so the workflow refuses to publish a tag that disagrees
+# with it. Bump the version, commit, then tag.
+name: Release
 
 on:
+  push:
+    tags:
+      - "v*"
+  # Lets you re-run a release for an existing tag from the Actions tab.
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing v* tag to (re)publish"
+        required: true
+
+permissions:
+  contents: write
 
 jobs:
-  build:
+  release:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+          # The prebuild script stamps the build id from the git history.
+          fetch-depth: 0
+
+      - name: Resolve version
+        id: version
+        working-directory: decky-plugin
+        run: |
+          set -euo pipefail
+          tag="${{ github.event.inputs.tag || github.ref_name }}"
+          manifest=$(node -p "require('./package.json').version")
+          echo "tag=$tag"           >> "$GITHUB_OUTPUT"
+          echo "version=$manifest"  >> "$GITHUB_OUTPUT"
+
+          if [ "$tag" != "v$manifest" ]; then
+            echo "::error::Tag '$tag' does not match package.json version '$manifest'." \
+                 "Decky shows the manifest version, so the two must agree." \
+                 "Either tag v$manifest, or bump package.json to ${tag#v}."
+            exit 1
+          fi
+
+          # A tag like v0.3.0-rc1 publishes as a pre-release.
+          if [[ "$tag" == *-* ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Extract release notes for this version
+        id: notes
+        run: |
+          set -euo pipefail
+          version="${{ steps.version.outputs.version }}"
+          if [ ! -f CHANGELOG.md ]; then
+            echo "::error::CHANGELOG.md is missing."
+            exit 1
+          fi
+          # Everything between this version's heading and the next one.
+          awk -v v="## v$version" '
+            $0 == v      { grab = 1; next }
+            grab && /^## / { exit }
+            grab         { print }
+          ' CHANGELOG.md > release-notes.md
+
+          if [ ! -s release-notes.md ]; then
+            echo "::error::No '## v$version' section in CHANGELOG.md."
+            exit 1
+          fi
+          echo "Release notes:"; cat release-notes.md
 
       - uses: oven-sh/setup-bun@v2
         with:
@@ -27,34 +84,32 @@ jobs:
         working-directory: decky-plugin
         run: bun install
 
-      - name: Build plugin
+      - name: Type check
         working-directory: decky-plugin
-        run: bun run build
+        run: bun run typecheck
 
       - name: Package plugin
         working-directory: decky-plugin
+        # The package script also runs prebuild and rollup, so CI and local
+        # builds cannot drift apart.
+        run: bun run package
+
+      - name: Name the artifact after the version
+        id: artifact
+        working-directory: decky-plugin
         run: |
-          mkdir -p "OneXPlayer Apex Tools/dist" "OneXPlayer Apex Tools/py_modules" "OneXPlayer Apex Tools/logs"
-          cp package.json plugin.json main.py "OneXPlayer Apex Tools/"
-          cp dist/index.js "OneXPlayer Apex Tools/dist/"
-          cp py_modules/*.py "OneXPlayer Apex Tools/py_modules/"
-          zip -r OneXPlayer_Apex_Tools.zip "OneXPlayer Apex Tools"
+          set -euo pipefail
+          out="OneXPlayer_Apex_SteamOS_Tools-${{ steps.version.outputs.tag }}.zip"
+          mv OneXPlayer_Apex_SteamOS_Tools.zip "$out"
+          echo "path=decky-plugin/$out" >> "$GITHUB_OUTPUT"
+          unzip -l "$out"
 
-      - name: Get short SHA
-        id: sha
-        run: echo "short=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
-
-      - name: Create Release
+      - name: Publish release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: build-${{ steps.sha.outputs.short }}
-          name: Build ${{ steps.sha.outputs.short }}
-          body: |
-            Automated build from commit ${{ github.sha }}.
-
-            ## Installation
-            1. Download `OneXPlayer_Apex_Tools.zip`
-            2. Extract to `~/homebrew/plugins/`
-            3. Restart Decky: `sudo systemctl restart plugin_loader.service`
-          files: decky-plugin/OneXPlayer_Apex_Tools.zip
-          make_latest: true
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: ${{ steps.version.outputs.tag }}
+          body_path: release-notes.md
+          files: ${{ steps.artifact.outputs.path }}
+          prerelease: ${{ steps.version.outputs.prerelease }}
+          make_latest: ${{ steps.version.outputs.prerelease == 'false' }}

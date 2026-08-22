@@ -1,11 +1,11 @@
 {
-  "name": "OneXPlayer Apex Tools",
-  "author": "srsholmes",
+  "name": "OneXPlayer Apex SteamOS Tools",
+  "author": "srsholmes, ArcheoCodix",
   "flags": ["root"],
   "api_version": 1,
   "publish": {
-    "tags": ["hardware", "handheld", "onexplayer"],
-    "description": "Temporary workaround fixes for OneXPlayer Apex on Bazzite: button fix, sleep fix, home button monitor, and fan control.",
+    "tags": ["hardware", "handheld", "onexplayer", "steamos"],
+    "description": "Fixes for the OneXPlayer Apex on SteamOS: volume buttons, internal gamepad recovery after resume, and a parametric EQ for the internal speakers.",
     "image": ""
   }
 }

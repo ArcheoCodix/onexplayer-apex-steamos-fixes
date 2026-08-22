@@ -2,15 +2,13 @@ import { callable } from "@decky/api";
 import type { StatusResponse, FixResult, EQBand } from "./types";
 
 export const getStatus = callable<[], StatusResponse>("get_status");
-export const applyButtonFix = callable<[], FixResult>("apply_button_fix");
-export const revertButtonFix = callable<[], FixResult>("revert_button_fix");
-export const applyLightSleep = callable<[], FixResult>("apply_light_sleep");
-export const revertLightSleep = callable<[], FixResult>("revert_light_sleep");
 export const saveLogs = callable<[], { success: boolean; path?: string; error?: string }>("save_logs");
+export const getLogs = callable<[number], { lines: string[]; log_file: string; error?: string }>("get_logs");
+
+// Speaker DSP (parametric EQ on the internal speakers)
 export const enableSpeakerDSP = callable<[string], FixResult>("enable_speaker_dsp");
 export const disableSpeakerDSP = callable<[], FixResult>("disable_speaker_dsp");
 export const setDSPProfile = callable<[string], FixResult>("set_dsp_profile");
-export const getLogs = callable<[number], { lines: string[]; log_file: string; error?: string }>("get_logs");
 export const getPresetBands = callable<[string], { bands?: EQBand[]; error?: string }>("get_preset_bands");
 export const getCustomProfiles = callable<[], { profiles: Record<string, Record<string, number>> }>("get_custom_profiles");
 export const saveCustomProfile = callable<[string, Record<string, number>], FixResult>("save_custom_profile");
@@ -21,17 +19,13 @@ export const bypassSpeakerDSP = callable<[], { success: boolean; bypassed?: bool
 export const unbypassSpeakerDSP = callable<[], { success: boolean; bypassed?: boolean; error?: string }>("unbypass_speaker_dsp");
 export const isBypassedSpeakerDSP = callable<[], { bypassed: boolean; error?: string }>("is_bypassed_speaker_dsp");
 
-// oxpec EC sensor driver
-export const applyOxpec = callable<[], FixResult>("apply_oxpec");
-export const revertOxpec = callable<[], FixResult>("revert_oxpec");
-
 // Resume recovery (gamepad after sleep)
 export const applyResumeFix = callable<[], FixResult>("apply_resume_fix");
 export const revertResumeFix = callable<[], FixResult>("revert_resume_fix");
 
+// Volume buttons (InputPlumber swallows them without an override)
+export const applyVolumeButtons = callable<[], FixResult>("apply_volume_buttons");
+export const revertVolumeButtons = callable<[], FixResult>("revert_volume_buttons");
+
 // xHCI recovery (manual gamepad recovery)
 export const recoverGamepad = callable<[], FixResult>("recover_gamepad");
-
-// Sleep enablement (fw-fanctrl + fingerprint)
-export const applySleepEnable = callable<[], FixResult>("apply_sleep_enable");
-export const revertSleepEnable = callable<[], FixResult>("revert_sleep_enable");
