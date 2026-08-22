@@ -1,6 +1,6 @@
 {
   "name": "OneXPlayer Apex SteamOS Tools",
-  "author": "srsholmes",
+  "author": "srsholmes, ArcheoCodix",
   "flags": ["root"],
   "api_version": 1,
   "publish": {
