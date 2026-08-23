@@ -120,6 +120,9 @@ QUIET_REQUIRED=2
 # How many one-second snapshots to take once the chain is back, so a device that
 # re-enumerates after the fact is on record instead of inferred later
 AFTER_POLLS=4
+# Consecutive checks with all four devices present before concluding there is
+# nothing to do. One look is not enough: see the comment in recover_gamepad.
+INTACT_REQUIRED=2
 
 START=$(date +%s%N)
 
@@ -183,8 +186,21 @@ snapshot() {
     log "state[$1] $s"
 }
 
+# The pair that matters once a rebind is under way: the hub plus the gamepad,
+# which is the last of the four to enumerate and the one a user notices.
 chain_healthy() {
     find_usb "$HUB_VID" "$HUB_PID" >/dev/null || return 1
+    find_usb "$GAMEPAD_VID" "$GAMEPAD_PID" >/dev/null || return 1
+    return 0
+}
+
+# The stricter test, used to decide there is nothing wrong at all. Any of the
+# four missing means something is off, and a chain caught mid-teardown fails it
+# where chain_healthy can still pass.
+chain_intact() {
+    find_usb "$HUB_VID" "$HUB_PID" >/dev/null || return 1
+    find_usb "$BUTTONS_VID" "$BUTTONS_PID" >/dev/null || return 1
+    find_usb "$VENDORHID_VID" "$VENDORHID_PID" >/dev/null || return 1
     find_usb "$GAMEPAD_VID" "$GAMEPAD_PID" >/dev/null || return 1
     return 0
 }
@@ -252,7 +268,7 @@ udev_state() {
 # sleeping a fixed amount and hoping. Returns 0 when it is time to act, 1 when
 # the chain came back on its own and there is nothing to do.
 wait_until_settled() {
-    local secs=0 quiet=0 last='' seq udev
+    local secs=0 quiet=0 intact=0 last='' seq udev
     while :; do
         seq=$(seqnum)
         udev=$(udev_state)
@@ -262,11 +278,15 @@ wait_until_settled() {
             quiet=0
         fi
         last=$seq
+        if chain_intact; then intact=$((intact + 1)); else intact=0; fi
 
-        snapshot "t+${secs}s seq=$seq udev=$udev quiet=$quiet"
+        snapshot "t+${secs}s seq=$seq udev=$udev quiet=$quiet intact=$intact"
 
-        if chain_healthy; then
-            log "Chain came back on its own after ${secs}s — touching nothing"
+        # Both signals, not either: all four devices there *and* the kernel no
+        # longer emitting device events. A chain that is still tearing down can
+        # show devices present for a moment while events are still flowing.
+        if [ "$intact" -ge "$INTACT_REQUIRED" ] && [ "$quiet" -ge 1 ]; then
+            log "Chain intact on $intact consecutive checks and quiet — nothing to do"
             return 1
         fi
         if [ "$secs" -ge "$QUIET_FLOOR" ] && [ "$quiet" -ge "$QUIET_REQUIRED" ]; then
@@ -304,16 +324,24 @@ wait_for_chain() {
 recover_gamepad() {
     local driver_link drv rs
 
-    if chain_healthy; then
-        snapshot healthy
-        log "Internal USB chain is healthy — nothing to do"
-        return
-    fi
-
-    snapshot down
+    # No decision from a single reading, not even the "nothing is wrong" one.
+    # A resume where the controller died logged this:
+    #
+    #   20:19:08.116  HC died; usb 1-1, 1-1.1, 1-1.2 disconnect
+    #   20:19:08.167  PM: suspend exit
+    #   20:19:08.251  usb 1-1.3 disconnect          <- the gamepad, 135ms later
+    #
+    # A check 250ms in still found the hub and the gamepad in sysfs while the
+    # other two were already gone, called the chain healthy and returned. The
+    # gamepad stayed dead until it was recovered by hand. There was no instant
+    # at which one look was reliable, so the loop decides instead.
+    snapshot start
     kernel_verdict
-    log "Internal chain is down — watching for the resume to settle"
-    wait_until_settled || return
+    log "Watching for the resume to settle"
+    # `return 0` explicitly: bare `return` would propagate the 1 that means
+    # "nothing to do", and systemd would mark the unit failed on every normal
+    # resume.
+    wait_until_settled || return 0
 
     if ! find_xhci; then
         log "$XHCI_HOW — cannot recover"
