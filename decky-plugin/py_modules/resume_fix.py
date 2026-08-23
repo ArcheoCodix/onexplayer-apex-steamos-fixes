@@ -108,6 +108,9 @@ QUIET_FLOOR=3
 QUIET_CEILING=10
 # Consecutive quiet polls required before acting
 QUIET_REQUIRED=2
+# How many one-second snapshots to take once the chain is back, so a device that
+# re-enumerates after the fact is on record instead of inferred later
+AFTER_POLLS=4
 
 START=$(date +%s%N)
 
@@ -189,7 +192,14 @@ find_xhci() {
 # `journalctl -t apex-resume-recover` explains an occurrence without having to
 # cross-reference the kernel log by hand.
 kernel_verdict() {
-    dmesg 2>/dev/null | grep -E 'xhci_hcd 0000|usb 1-1: ' | tail -3 \
+    local dm
+    dm=$(dmesg 2>/dev/null) || return
+    # Two separate greps on purpose: a single pattern with tail -3 kept only the
+    # PM error lines and dropped the controller's own verdict, which is the half
+    # that says *why*.
+    printf '%s\n' "$dm" | grep -E 'xhci_hcd .*(not responding|HC died)' | tail -2 \
+        | while IFS= read -r line; do log "kernel: $line"; done
+    printf '%s\n' "$dm" | grep -E 'usb 1-1: PM:' | tail -2 \
         | while IFS= read -r line; do log "kernel: $line"; done
 }
 
@@ -300,7 +310,17 @@ recover_gamepad() {
     else
         log "Chain did not come back within ${SETTLE_TIMEOUT}s"
     fi
-    snapshot after
+
+    # Snapshot for a few seconds rather than once. A single reading taken
+    # immediately after the bind says nothing: user space has not had time to
+    # react, and a device can still re-enumerate a second later — which is
+    # exactly what was missed before.
+    local i=0
+    while [ "$i" -lt "$AFTER_POLLS" ]; do
+        sleep 1
+        i=$((i + 1))
+        snapshot "after t+${i}s"
+    done
 }
 
 recover_gamepad
