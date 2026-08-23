@@ -3,8 +3,9 @@
 Installs a oneshot systemd unit ordered after the sleep targets, so systemd
 itself runs the recovery script once per resume. The script waits for the resume
 to stop producing device events, then rebinds the xHCI USB controller if the
-internal chain still has not come back, then restarts InputPlumber so it
-re-adopts the gamepad.
+internal chain still has not come back. InputPlumber re-attaches the recovered
+devices by itself, so it is only restarted if its controller target is missing
+once the chain is stable.
 
 Originally based on the xpad-fix3 package from the Korean OXP community, which
 kept a dbus-monitor daemon running to catch the resume signal.
@@ -116,6 +117,9 @@ QUIET_FLOOR=3
 QUIET_CEILING=10
 # Consecutive quiet polls required before acting
 QUIET_REQUIRED=2
+# How many one-second snapshots to take once the chain is back, so a device that
+# re-enumerates after the fact is on record instead of inferred later
+AFTER_POLLS=4
 
 START=$(date +%s%N)
 
@@ -148,10 +152,11 @@ device_state() {
     return 1
 }
 
-# What Steam actually consumes, so "did the session get its controller back"
-# stops being something to reconstruct from three log sources afterwards.
+# What Steam actually consumes.
 #   deck-uhid : InputPlumber's virtual Steam Deck Controller, a uhid device
-#   steaminput: Steam Input's own virtual pad, created once Steam has bound one
+#   steaminput: Steam Input's own virtual pad, present once Steam has bound one
+# Both survive the internal chain disappearing, so neither proves events are
+# flowing — but they do show whether our own actions destroyed them.
 steam_state() {
     local e n found=-
     if grep -lqs 'Generic Steam Controller' /sys/class/hidraw/*/device/uevent; then
@@ -218,7 +223,14 @@ find_xhci() {
 # `journalctl -t apex-resume-recover` explains an occurrence without having to
 # cross-reference the kernel log by hand.
 kernel_verdict() {
-    dmesg 2>/dev/null | grep -E 'xhci_hcd 0000|usb 1-1: ' | tail -3 \
+    local dm
+    dm=$(dmesg 2>/dev/null) || return
+    # Two separate greps on purpose: a single pattern with tail -3 kept only the
+    # PM error lines and dropped the controller's own verdict, which is the half
+    # that says *why*.
+    printf '%s\n' "$dm" | grep -E 'xhci_hcd .*(not responding|HC died)' | tail -2 \
+        | while IFS= read -r line; do log "kernel: $line"; done
+    printf '%s\n' "$dm" | grep -E 'usb 1-1: PM:' | tail -2 \
         | while IFS= read -r line; do log "kernel: $line"; done
 }
 
@@ -324,24 +336,46 @@ recover_gamepad() {
 
     # The devices come back one by one over two to three seconds, and how long
     # exactly varies between resumes, so wait for them rather than guessing.
-    if ! wait_for_chain; then
+    if wait_for_chain; then
+        log "Internal chain is back after $((SETTLED_AFTER * 250))ms"
+    else
         log "Chain did not come back within ${SETTLE_TIMEOUT}s"
-        snapshot after
+    fi
+
+    # Snapshot for a few seconds rather than once. A single reading taken
+    # immediately after the bind says nothing: user space has not had time to
+    # react, and a device can still re-enumerate a second later — which is
+    # exactly what was missed before.
+    #
+    # This window is also what InputPlumber needs. It re-attaches recovered
+    # source devices to its existing composite device on its own, starting about
+    # 70ms after they reappear — and an unconditional restart here killed it
+    # mid-way, about 100ms in, in three occurrences out of four:
+    #
+    #   22:47:34.885  Found missing input device  -> existing composite device
+    #   22:47:34.908  Found missing hidraw device -> existing composite device
+    #   22:47:34.989  Received SIGTERM
+    #
+    # So leave it alone and watch. The restart stays only as a fallback for the
+    # case the watching is there to catch: InputPlumber's target actually gone.
+    local i=0
+    while [ "$i" -lt "$AFTER_POLLS" ]; do
+        sleep 1
+        i=$((i + 1))
+        snapshot "after t+${i}s"
+    done
+
+    if grep -lqs 'Generic Steam Controller' /sys/class/hidraw/*/device/uevent; then
+        log "InputPlumber still has its controller target — not restarting it"
         return
     fi
-    log "Internal chain is back after $((SETTLED_AFTER * 250))ms"
-
-    # Snapshot before and after, because whether this restart is needed at all
-    # is still an open question: InputPlumber has its own path for re-attaching
-    # a source device that came back, and restarting destroys and recreates the
-    # very controller Steam is waiting for. The two snapshots are what will
-    # answer it on the next occurrence.
-    snapshot "before inputplumber restart"
+    log "InputPlumber has no controller target after ${AFTER_POLLS}s — restarting it"
     if systemctl restart inputplumber.service 2>/dev/null; then
         log "Restarted inputplumber.service"
     else
         log "Failed to restart inputplumber.service"
     fi
+    sleep 2
     snapshot "after inputplumber restart"
 }
 
